@@ -3,6 +3,7 @@
 from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, timedelta
+from unicodedata import normalize
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -294,6 +295,15 @@ def default_liquidation_rows(installments: list[Installment]) -> pd.DataFrame:
     )
 
 
+def normalize_delay_treatment(delay_treatment: str) -> str:
+    normalized = normalize("NFKD", str(delay_treatment or "")).encode("ascii", "ignore").decode("ascii").lower()
+    if normalized.startswith("liquidar"):
+        return "liquidar"
+    if normalized.startswith("distribuir"):
+        return "distribuir"
+    return "manter"
+
+
 def build_delay_scenario_rows(
     installments: list[Installment],
     delayed_numbers: list[int],
@@ -303,6 +313,7 @@ def build_delay_scenario_rows(
     delay_treatment: str = "Manter atraso em aberto",
 ) -> pd.DataFrame:
     rows = default_liquidation_rows(installments)
+    treatment = normalize_delay_treatment(delay_treatment)
     delayed_set = set(delayed_numbers)
     shortfall_by_number: dict[int, float] = {}
     for index, row in rows.iterrows():
@@ -322,7 +333,7 @@ def build_delay_scenario_rows(
             rows.loc[index, "Valor pago"] = 0.0
         shortfall_by_number[number] = max(amount - paid_value, 0.0)
 
-    if delay_treatment != "Manter atraso em aberto" and shortfall_by_number:
+    if treatment != "manter" and shortfall_by_number:
         total_shortfall = sum(shortfall_by_number.values())
         future_indexes = [
             index
@@ -330,7 +341,7 @@ def build_delay_scenario_rows(
             if int(row["Parcela"]) > min(shortfall_by_number)
             and int(row["Parcela"]) not in delayed_set
         ]
-        if delay_treatment == "Liquidar na próxima parcela":
+        if treatment == "liquidar":
             future_indexes = future_indexes[:1]
 
         if future_indexes:
@@ -355,9 +366,10 @@ def future_regularization_indexes(
         for index, row in rows.iterrows()
         if int(row["Parcela"]) > first_delayed and int(row["Parcela"]) not in delayed_set
     ]
-    if delay_treatment == "Liquidar na próxima parcela":
+    treatment = normalize_delay_treatment(delay_treatment)
+    if treatment == "liquidar":
         return indexes[:1]
-    if delay_treatment == "Distribuir nas parcelas seguintes":
+    if treatment == "distribuir":
         return indexes
     return []
 
@@ -373,7 +385,7 @@ def settle_delay_treatment(
     liquidation = calculate_liquidation_impacts(installments, rows, params)
     target_indexes = future_regularization_indexes(rows, delayed_numbers, delay_treatment)
 
-    if delay_treatment == "Manter atraso em aberto" or not target_indexes:
+    if normalize_delay_treatment(delay_treatment) == "manter" or not target_indexes:
         return rows, liquidation
 
     # Recalcula em rodadas curtas porque mora/multa também consomem pagamentos
@@ -393,6 +405,20 @@ def settle_delay_treatment(
     return rows, liquidation
 
 
+def calculate_automatic_analysis_date(scenario_rows: pd.DataFrame, installments: list[Installment]) -> date:
+    payment_dates = []
+    for _, row in scenario_rows.iterrows():
+        paid_value = float(row.get("Valor pago", 0.0) or 0.0)
+        if paid_value <= 0:
+            continue
+        fallback = row.get("Data de vencimento", installments[-1].due_date)
+        payment_dates.append(parse_date_value(row.get("Data de pagamento"), fallback))
+
+    if payment_dates:
+        return max(payment_dates) + timedelta(days=1)
+    return max(item.due_date for item in installments) + timedelta(days=1)
+
+
 def parse_date_value(value: object, fallback: date) -> date:
     if isinstance(value, date):
         return value
@@ -404,9 +430,10 @@ def parse_date_value(value: object, fallback: date) -> date:
 
 def normalize_status(value: object) -> str:
     raw = str(value or "").strip().lower()
-    if "parcial" in raw:
+    ascii_raw = normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+    if "parcial" in ascii_raw:
         return "Pago parcialmente"
-    if "não" in raw or "nao" in raw or "não" in raw:
+    if "nao" in ascii_raw or "no pago" in ascii_raw:
         return "Não pago"
     return "Pago integralmente"
 
@@ -458,7 +485,6 @@ def normalize_payment_schedule(
             paid_value = expected_value
         elif status == "Não pago":
             paid_value = 0.0
-            payment_date = due_date
         else:
             paid_value = min(max(paid_value, 0.0), expected_value)
         paid_value += max(additional_payment, 0.0)
@@ -474,14 +500,19 @@ def normalize_payment_schedule(
 def apply_payment_waterfall(
     payment_amount: float,
     mora_balance: float,
+    fine_balance: float,
     overdue_balance: float,
     current_due: float,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float]:
     remaining_payment = max(payment_amount, 0.0)
 
     paid_mora = min(remaining_payment, mora_balance)
     mora_balance -= paid_mora
     remaining_payment -= paid_mora
+
+    paid_fine = min(remaining_payment, fine_balance)
+    fine_balance -= paid_fine
+    remaining_payment -= paid_fine
 
     paid_overdue = min(remaining_payment, overdue_balance)
     overdue_balance -= paid_overdue
@@ -491,7 +522,7 @@ def apply_payment_waterfall(
     current_due -= paid_current
     remaining_payment -= paid_current
 
-    return mora_balance, overdue_balance, current_due, remaining_payment
+    return mora_balance, fine_balance, overdue_balance, current_due, remaining_payment
 
 
 def calculate_liquidation_impacts(
@@ -506,9 +537,12 @@ def calculate_liquidation_impacts(
     overdue_balance = 0.0
     mora_balance = 0.0
     fine_balance = 0.0
+    mora_charged_total = 0.0
+    fine_charged_total = 0.0
     expected_accumulated = 0.0
     realized_accumulated = 0.0
     last_interest_date = min(item.due_date for item in installments)
+    calculation_horizon = params.analysis_date
 
     for item in installments:
         schedule_row = schedule.loc[schedule["Parcela"] == item.number].iloc[0]
@@ -517,16 +551,22 @@ def calculate_liquidation_impacts(
         payment_date = parse_date_value(schedule_row["Data de pagamento"], due_date)
         paid_value = float(schedule_row["Valor pago"] or 0.0)
         if status == "Não pago":
-            payment_date = params.analysis_date
+            payment_date = max(params.analysis_date, payment_date)
+            calculation_horizon = max(calculation_horizon, payment_date)
 
         if paid_value > 0:
             cycle_event_date = max(due_date, min(payment_date, params.analysis_date))
         else:
             cycle_event_date = due_date
+        mora_generated_cycle = 0.0
+        fine_generated_cycle = 0.0
         if params.interest_base == "sobre saldo vencido":
-            mora_balance += calculate_interest(overdue_balance, last_interest_date, due_date, params)
+            interest_value = calculate_interest(overdue_balance, last_interest_date, due_date, params)
         else:
-            mora_balance += calculate_interest(max(overdue_balance, 0), last_interest_date, due_date, params)
+            interest_value = calculate_interest(max(overdue_balance, 0), last_interest_date, due_date, params)
+        mora_balance += interest_value
+        mora_generated_cycle += interest_value
+        mora_charged_total += interest_value
 
         current_due = item.amount
         expected_accumulated += item.amount
@@ -535,18 +575,25 @@ def calculate_liquidation_impacts(
             interest_base = overdue_balance + current_due
             if params.interest_base == "sobre parcela em atraso":
                 interest_base = current_due
-            mora_balance += calculate_interest(interest_base, due_date, payment_date, params)
+            interest_value = calculate_interest(interest_base, due_date, payment_date, params)
+            mora_balance += interest_value
+            mora_generated_cycle += interest_value
+            mora_charged_total += interest_value
 
-        mora_balance, overdue_balance, current_due, excess_payment = apply_payment_waterfall(
+        mora_balance, fine_balance, overdue_balance, current_due, excess_payment = apply_payment_waterfall(
             paid_value,
             mora_balance,
+            fine_balance,
             overdue_balance,
             current_due,
         )
 
         unpaid_after_payment = current_due
-        if unpaid_after_payment > 0 and params.analysis_date > due_date + timedelta(days=params.tolerance_days):
-            fine_balance += params.fine_fixed + unpaid_after_payment * params.fine_pct
+        assessment_date = max(params.analysis_date, payment_date)
+        if unpaid_after_payment > 0 and assessment_date > due_date + timedelta(days=params.tolerance_days):
+            fine_generated_cycle = params.fine_fixed + unpaid_after_payment * params.fine_pct
+            fine_balance += fine_generated_cycle
+            fine_charged_total += fine_generated_cycle
 
         overdue_balance += unpaid_after_payment
         realized_accumulated += paid_value
@@ -561,9 +608,11 @@ def calculate_liquidation_impacts(
                 "Data de vencimento": due_date,
                 "Valor previsto": item.amount,
                 "Status": status,
-                "Data de pagamento": payment_date if paid_value > 0 else None,
+                "Data de pagamento": payment_date if paid_value > 0 or status == "Não pago" else None,
                 "Valor pago": paid_value,
                 "Saldo em atraso": overdue_balance,
+                "Mora gerada": mora_generated_cycle,
+                "Multa gerada": fine_generated_cycle,
                 "Mora": mora_balance,
                 "Multa": fine_balance,
                 "Saldo exigível atualizado": saldo_exigivel,
@@ -573,15 +622,19 @@ def calculate_liquidation_impacts(
             }
         )
 
-    final_interest_date = max(params.analysis_date, last_interest_date)
+    final_interest_date = max(calculation_horizon, last_interest_date)
+    final_interest_value = 0.0
     if params.interest_base == "sobre saldo vencido":
-        mora_balance += calculate_interest(overdue_balance, last_interest_date, final_interest_date, params)
+        final_interest_value = calculate_interest(overdue_balance, last_interest_date, final_interest_date, params)
+        mora_balance += final_interest_value
+        mora_charged_total += final_interest_value
     fine_and_mora = mora_balance + fine_balance
     expected_total = sum(item.amount for item in installments)
     realized_total = sum(amount for _, amount in payments)
     gap_total = max(expected_total - realized_total, 0.0)
 
     if rows:
+        rows[-1]["Mora gerada"] += final_interest_value
         rows[-1]["Mora"] = mora_balance
         rows[-1]["Saldo exigível atualizado"] = overdue_balance + fine_and_mora
 
@@ -595,6 +648,8 @@ def calculate_liquidation_impacts(
         "overdue_total": overdue_balance,
         "mora_total": mora_balance,
         "fine_total": fine_balance,
+        "mora_charged_total": mora_charged_total,
+        "fine_charged_total": fine_charged_total,
         "saldo_exigivel_total": overdue_balance + fine_and_mora,
     }
 
@@ -1366,37 +1421,32 @@ def main() -> None:
         st.caption(
             "Use esta aba para testar deterioração da liquidação. A operação prevista permanece preservada na primeira aba."
         )
-        param_cols = st.columns(4)
-        with param_cols[0]:
-            analysis_date = st.date_input("Data de análise", value=date.today(), format="DD/MM/YYYY")
-            monthly_late_rate_pct = st.number_input("Taxa de mora (% ao mês)", min_value=0.0, value=1.0, step=0.1)
-        with param_cols[1]:
-            fine_fixed = st.number_input("Multa fixa por atraso", min_value=0.0, value=0.0, step=100.0)
-            fine_pct = st.number_input("Multa percentual por atraso (%)", min_value=0.0, value=0.0, step=0.1)
-        with param_cols[2]:
-            tolerance_days = st.number_input("Dias de tolerância", min_value=0, max_value=60, value=0, step=1)
-            interest_base = st.selectbox("Base do juro", ["sobre saldo vencido", "sobre parcela em atraso"])
-        with param_cols[3]:
-            adjusted_qmm_enabled = st.toggle("Exibir QMM ajustado", value=True)
-            st.caption("Mora calculada por juros simples diários.")
-
-        st.info(
-            "Premissas do atraso: parcelas não selecionadas são pagas integralmente no vencimento; "
-            "mora = saldo vencido x taxa diária equivalente; saldo exigível = atraso + mora + multa; "
-            "QMM ajustado = QMM de referência - saldo exigível em aberto."
+        st.subheader("Configuração da simulação")
+        st.caption(
+            "Ajuste esta seção como um cenário alternativo. Parcelas não marcadas continuam pagas integralmente no vencimento."
         )
 
-        delay_params = DelayParameters(
-            analysis_date=analysis_date,
-            monthly_late_rate=float(monthly_late_rate_pct) / 100,
-            fine_fixed=float(fine_fixed),
-            fine_pct=float(fine_pct) / 100,
-            tolerance_days=int(tolerance_days),
-            interest_base=interest_base,
-            adjusted_qmm_enabled=bool(adjusted_qmm_enabled),
-        )
+        with st.expander("Parâmetros de atraso / mora", expanded=True):
+            param_cols = st.columns(4)
+            with param_cols[0]:
+                monthly_late_rate_pct = st.number_input("Taxa de mora (% ao mês)", min_value=0.0, value=1.0, step=0.1)
+                tolerance_days = st.number_input("Dias de tolerância", min_value=0, max_value=60, value=0, step=1)
+            with param_cols[1]:
+                fine_fixed = st.number_input("Multa fixa por atraso", min_value=0.0, value=0.0, step=100.0)
+                fine_pct = st.number_input("Multa percentual por atraso (%)", min_value=0.0, value=0.0, step=0.1)
+            with param_cols[2]:
+                interest_base = st.selectbox("Base do juro", ["sobre saldo vencido", "sobre parcela em atraso"])
+                use_manual_analysis_date = st.toggle("Usar data-base manual", value=False)
+            with param_cols[3]:
+                manual_analysis_date = st.date_input(
+                    "Data-base manual",
+                    value=max(item.due_date for item in installments) + timedelta(days=1),
+                    format="DD/MM/YYYY",
+                    disabled=not use_manual_analysis_date,
+                )
+                adjusted_qmm_enabled = st.toggle("Exibir QMM ajustado", value=True)
+                st.caption("Mora calculada por juros simples diários.")
 
-        st.subheader("Configuração do cenário de atraso")
         installment_labels = {
             f"Parcela {item.number} - {format_date_pt(item.due_date)} - {format_brl(item.amount)}": item.number
             for item in installments
@@ -1421,7 +1471,7 @@ def main() -> None:
         paid_by_number: dict[int, float] = {}
         payment_date_by_number: dict[int, date] = {}
         if delayed_numbers:
-            st.caption("Configure apenas as parcelas em atraso. As demais ficam pagas integralmente no vencimento.")
+            st.caption("Configure apenas as parcelas em atraso.")
         else:
             st.info("Nenhuma parcela marcada como atrasada. O cenário alternativo replica a operação prevista.")
 
@@ -1437,12 +1487,16 @@ def main() -> None:
                         key=f"delay_status_{number}",
                     )
                 with c2:
-                    payment_date = st.date_input(
-                        "Data de pagamento / análise",
-                        value=max(item.due_date, analysis_date),
-                        format="DD/MM/YYYY",
-                        key=f"delay_payment_date_{number}",
-                    )
+                    if status == "Pago parcialmente":
+                        payment_date = st.date_input(
+                            "Data do pagamento parcial",
+                            value=item.due_date,
+                            format="DD/MM/YYYY",
+                            key=f"delay_payment_date_{number}",
+                        )
+                    else:
+                        payment_date = item.due_date
+                        st.metric("Apuração", "Data-base automática")
                 with c3:
                     if status == "Pago parcialmente":
                         paid_value = st.number_input(
@@ -1468,6 +1522,17 @@ def main() -> None:
             payment_date_by_number,
             delay_treatment,
         )
+        automatic_analysis_date = calculate_automatic_analysis_date(edited_table, installments)
+        analysis_date = manual_analysis_date if use_manual_analysis_date else automatic_analysis_date
+        delay_params = DelayParameters(
+            analysis_date=analysis_date,
+            monthly_late_rate=float(monthly_late_rate_pct) / 100,
+            fine_fixed=float(fine_fixed),
+            fine_pct=float(fine_pct) / 100,
+            tolerance_days=int(tolerance_days),
+            interest_base=interest_base,
+            adjusted_qmm_enabled=bool(adjusted_qmm_enabled),
+        )
         edited_table, liquidation = settle_delay_treatment(
             installments,
             edited_table,
@@ -1481,17 +1546,22 @@ def main() -> None:
                 st.warning("Não há parcelas futuras disponíveis para liquidar ou distribuir o atraso.")
         risk_projection = apply_liquidation_to_projection(projection, liquidation, delay_params)
 
-        risk_cols = st.columns(5)
+        st.divider()
+        st.subheader("Resumo executivo do cenário")
+        additional_payment_total = float(edited_table["Pagamento adicional"].sum())
+        risk_cols = st.columns(6)
         with risk_cols[0]:
-            render_metric_card("Atraso acumulado", format_brl(float(liquidation["overdue_total"])), "saldo vencido")
+            render_metric_card("Data-base", format_date_pt(analysis_date), "corte da simulação")
         with risk_cols[1]:
-            render_metric_card("Mora acumulada", format_brl(float(liquidation["mora_total"])), "juros por atraso")
+            render_metric_card("Atraso acumulado", format_brl(float(liquidation["overdue_total"])), "principal vencido")
         with risk_cols[2]:
-            render_metric_card("Saldo exigível", format_brl(float(liquidation["saldo_exigivel_total"])), "atraso + mora + multa")
+            render_metric_card("Mora gerada", format_brl(float(liquidation["mora_charged_total"])), "juros calculados")
         with risk_cols[3]:
-            render_metric_card("Cobrança realizada", format_brl(float(liquidation["realized_total"])), "pagamentos efetivos")
+            render_metric_card("Multa gerada", format_brl(float(liquidation["fine_charged_total"])), "penalidade calculada")
         with risk_cols[4]:
-            render_metric_card("Gap de cobrança", format_brl(float(liquidation["gap_total"])), "esperada - realizada")
+            render_metric_card("Pagamento adicional", format_brl(additional_payment_total), "regularização futura")
+        with risk_cols[5]:
+            render_metric_card("Cobrança realizada", format_brl(float(liquidation["realized_total"])), "fluxo efetivo")
 
         st.plotly_chart(
             build_chart(risk_projection, advance_date, float(dc_value)),
@@ -1499,17 +1569,45 @@ def main() -> None:
             key="chart_simulacao_atraso",
         )
 
+        with st.expander("Premissas do cálculo do atraso", expanded=False):
+            st.markdown(
+                "- Parcelas não selecionadas são consideradas pagas integralmente no vencimento.\n"
+                "- A cobrança esperada preserva o cronograma contratual original.\n"
+                "- A cobrança realizada considera apenas pagamentos efetivos e adicionais simulados.\n"
+                "- Mora = saldo vencido x taxa diária equivalente, após a tolerância definida.\n"
+                "- Multa gerada = multa fixa + percentual configurado sobre o valor vencido não pago.\n"
+                "- A memória mostra mora e multa geradas no ciclo, mesmo quando foram quitadas por pagamento adicional.\n"
+                "- Pagamentos adicionais baixam primeiro mora, depois multa, atraso acumulado e parcela corrente.\n"
+                "- QMM ajustado, quando ativo, reduz o QMM de referência pelo saldo exigível em aberto."
+            )
+
         result_table = liquidation["result_table"].copy()
+        result_table = result_table[
+            [
+                "Parcela",
+                "Data de vencimento",
+                "Valor previsto",
+                "Status",
+                "Data de pagamento",
+                "Valor pago",
+                "Saldo em atraso",
+                "Mora gerada",
+                "Multa gerada",
+                "Pagamento adicional",
+            ]
+        ].rename(
+            columns={
+                "Mora gerada": "Mora",
+                "Multa gerada": "Multa",
+            }
+        )
         money_columns = [
             "Valor previsto",
             "Valor pago",
             "Saldo em atraso",
-            "Mora",
             "Multa",
-            "Saldo exigível atualizado",
-            "Gap de cobrança",
+            "Mora",
             "Pagamento adicional",
-            "Excedente amortizado",
         ]
         for col in money_columns:
             result_table[col] = result_table[col].map(format_brl)
@@ -1517,10 +1615,12 @@ def main() -> None:
         result_table["Data de pagamento"] = result_table["Data de pagamento"].apply(
             lambda value: "-" if value is None or pd.isna(value) else format_date_pt(value)
         )
-        st.dataframe(result_table, use_container_width=True, hide_index=True)
+        with st.expander("Memória de cálculo por parcela", expanded=False):
+            st.dataframe(result_table, use_container_width=True, hide_index=True)
 
-        risk_timeline = build_timeline_comments(advance_date, grace_end, installments, radars, liquidation)
-        st.dataframe(risk_timeline, use_container_width=True, hide_index=True)
+        with st.expander("Comentários / marcos do cenário", expanded=False):
+            risk_timeline = build_timeline_comments(advance_date, grace_end, installments, radars, liquidation)
+            st.dataframe(risk_timeline, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
