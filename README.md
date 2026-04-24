@@ -12,6 +12,7 @@ Aplicação em Python com Streamlit, Plotly e Pandas para gerar uma visão execu
 - Quadro de Premissas.
 - Quadro de Parâmetros / Fórmulas.
 - Comentários e marcos de datas abaixo do gráfico.
+- Parametrização alternativa da operação: por quantidade de parcelas ou por prazo total.
 
 ## Como rodar localmente
 
@@ -35,6 +36,22 @@ A tela abre com o cenário de teste solicitado:
 
 ## Regras implementadas
 
+### Modo de definição da operação
+
+A operação pode ser definida de duas formas:
+
+- **Por parcelas:** o usuário informa a quantidade de parcelas e o sistema calcula os vencimentos nos próximos ciclos mensais do hospital. O prazo total real é calculado automaticamente pela diferença entre a última parcela e a data da antecipação.
+- **Por prazo total:** o usuário informa o prazo em dias corridos e o sistema calcula quantas parcelas cabem nos ciclos mensais do hospital até a data limite.
+
+Os dois campos não são usados como entradas livres ao mesmo tempo. O calendário mensal do hospital é sempre a referência operacional para reconciliar parcelas e prazo.
+
+Exemplo com antecipação em 18/04/2026 e pagamento hospitalar no dia 20:
+
+- Por 3 parcelas: 20/05/2026, 20/06/2026 e 20/07/2026, com prazo real de 93 dias.
+- Por prazo total de 93 dias: 3 parcelas nas mesmas datas.
+
+Se o prazo informado não comportar nenhum ciclo mensal, a aplicação mostra uma mensagem de erro amigável com o primeiro vencimento possível.
+
 O valor presente é calculado pela fórmula:
 
 ```text
@@ -43,7 +60,7 @@ VP = soma(Parcela_i / (1 + i)^(t_i / 30))
 
 Onde `i` é a taxa mensal e `t_i` é o prazo em dias corridos entre a data da antecipação e o vencimento da parcela.
 
-As parcelas sempre vencem no dia de pagamento mensal do hospital. A última parcela é alinhada ao primeiro pagamento hospitalar em ou após a data de referência do prazo total; as parcelas anteriores retornam mês a mês no mesmo dia de pagamento. Isso permite que o fundo retenha o valor da parcela no fluxo recebido e repasse o excedente ao médico.
+As parcelas sempre vencem no dia de pagamento mensal do hospital. A primeira parcela vence no primeiro pagamento hospitalar após o fim da carência; as demais seguem mensalmente no mesmo dia de pagamento. Isso permite que o fundo retenha o valor da parcela no fluxo recebido e repasse o excedente ao médico.
 
 A curva do QMM inicia no valor presente creditado ao médico, permanece flat durante a carência, cresce linearmente entre marcos e assume, no primeiro dia de cada radar, o valor futuro projetado até o fim da janela. Durante o radar, o QMM permanece flat e limitado ao valor do DC.
 

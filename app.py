@@ -68,23 +68,89 @@ def next_hospital_payment_date(reference: date, hospital_payment_day: int) -> da
     return candidate
 
 
-def calculate_installment_dates(
+def first_installment_cycle_date(
     advance_date: date,
-    total_term_days: int,
-    installment_count: int,
     hospital_payment_day: int,
-) -> list[date]:
-    contractual_final_date = advance_date + timedelta(days=total_term_days)
-    last_due_date = month_payment_date(contractual_final_date, hospital_payment_day)
-    if last_due_date < contractual_final_date:
-        last_due_date = month_payment_date(add_months(contractual_final_date, 1), hospital_payment_day)
+    grace_days: int,
+) -> date:
+    grace_end = advance_date + timedelta(days=grace_days)
+    candidate = month_payment_date(grace_end, hospital_payment_day)
+    if candidate < grace_end:
+        candidate = month_payment_date(add_months(grace_end, 1), hospital_payment_day)
+    return candidate
 
-    # As parcelas precisam coincidir com os ciclos de pagamento do hospital,
-    # pois o fundo liquida a antecipação ao reter a parcela no fluxo recebido.
-    return [
-        month_payment_date(add_months(last_due_date, months_back), hospital_payment_day)
-        for months_back in range(-(installment_count - 1), 1)
-    ]
+
+def generate_hospital_cycles(
+    advance_date: date,
+    hospital_payment_day: int,
+    grace_days: int,
+    limit_date: date | None = None,
+    count: int | None = None,
+) -> list[date]:
+    cycles: list[date] = []
+    current = first_installment_cycle_date(advance_date, hospital_payment_day, grace_days)
+
+    while True:
+        if count is not None and len(cycles) >= count:
+            break
+        if limit_date is not None and current > limit_date:
+            break
+
+        cycles.append(current)
+        current = month_payment_date(add_months(current, 1), hospital_payment_day)
+
+    return cycles
+
+
+def calculate_installment_dates_by_count(
+    advance_date: date,
+    hospital_payment_day: int,
+    grace_days: int,
+    installment_count: int,
+) -> list[date]:
+    if installment_count < 1:
+        raise ValueError("Informe pelo menos 1 parcela.")
+
+    # As parcelas coincidem com os ciclos de pagamento do hospital, pois o fundo
+    # liquida a antecipação ao reter a parcela no fluxo recebido.
+    return generate_hospital_cycles(
+        advance_date=advance_date,
+        hospital_payment_day=hospital_payment_day,
+        grace_days=grace_days,
+        count=installment_count,
+    )
+
+
+def calculate_installment_dates_by_term(
+    advance_date: date,
+    hospital_payment_day: int,
+    grace_days: int,
+    total_term_days: int,
+) -> list[date]:
+    if total_term_days < 1:
+        raise ValueError("Informe um prazo total maior que zero.")
+
+    limit_date = advance_date + timedelta(days=total_term_days)
+    installment_dates = generate_hospital_cycles(
+        advance_date=advance_date,
+        hospital_payment_day=hospital_payment_day,
+        grace_days=grace_days,
+        limit_date=limit_date,
+    )
+    if not installment_dates:
+        first_due_date = first_installment_cycle_date(advance_date, hospital_payment_day, grace_days)
+        first_due_term = (first_due_date - advance_date).days
+        raise ValueError(
+            "O prazo informado não comporta nenhuma parcela. "
+            f"O primeiro vencimento possível é {format_date_pt(first_due_date)} "
+            f"({first_due_term} dias corridos após a antecipação)."
+        )
+
+    return installment_dates
+
+
+def calculate_real_total_term(advance_date: date, installment_dates: list[date]) -> int:
+    return (max(installment_dates) - advance_date).days
 
 
 def add_business_days(value: date, business_days: int) -> date:
@@ -263,22 +329,52 @@ def build_qmm_curve(
 def build_projection(
     advance_date: date,
     hospital_payment_day: int,
+    operation_mode: str,
     monthly_rate_pct: float,
-    total_term_days: int,
     grace_days: int,
     dc_value: float,
-    installment_count: int,
-    installment_amount: float,
+    total_term_days: int | None = None,
+    installment_count: int | None = None,
+    installment_amount: float | None = None,
+    split_automatically: bool = True,
 ) -> dict[str, object]:
     monthly_rate = monthly_rate_pct / 100
-    contractual_final_date = advance_date + timedelta(days=total_term_days)
-    installment_dates = calculate_installment_dates(
-        advance_date,
-        total_term_days,
-        installment_count,
-        hospital_payment_day,
-    )
-    final_date = max(contractual_final_date, max(installment_dates))
+
+    if operation_mode == "Por parcelas":
+        if installment_count is None:
+            raise ValueError("Informe a quantidade de parcelas.")
+        installment_dates = calculate_installment_dates_by_count(
+            advance_date=advance_date,
+            hospital_payment_day=hospital_payment_day,
+            grace_days=grace_days,
+            installment_count=installment_count,
+        )
+        real_total_term_days = calculate_real_total_term(advance_date, installment_dates)
+        input_total_term_days = None
+        calculated_installment_count = len(installment_dates)
+        contractual_final_date = max(installment_dates)
+    elif operation_mode == "Por prazo total":
+        if total_term_days is None:
+            raise ValueError("Informe o prazo total da operação.")
+        installment_dates = calculate_installment_dates_by_term(
+            advance_date=advance_date,
+            hospital_payment_day=hospital_payment_day,
+            grace_days=grace_days,
+            total_term_days=total_term_days,
+        )
+        real_total_term_days = calculate_real_total_term(advance_date, installment_dates)
+        input_total_term_days = total_term_days
+        calculated_installment_count = len(installment_dates)
+        contractual_final_date = advance_date + timedelta(days=total_term_days)
+    else:
+        raise ValueError("Selecione um modo de definição da operação.")
+
+    if split_automatically:
+        installment_amount = dc_value / calculated_installment_count
+    elif installment_amount is None or installment_amount <= 0:
+        raise ValueError("Informe um valor de parcela maior que zero.")
+
+    final_date = max(installment_dates)
     present_value, installments = calculate_present_value(
         advance_date,
         installment_dates,
@@ -316,6 +412,12 @@ def build_projection(
         "radars": radars,
         "final_date": final_date,
         "contractual_final_date": contractual_final_date,
+        "input_total_term_days": input_total_term_days,
+        "real_total_term_days": real_total_term_days,
+        "operation_mode": operation_mode,
+        "calculated_installment_count": calculated_installment_count,
+        "installment_amount": installment_amount,
+        "split_automatically": split_automatically,
         "chart_end_date": chart_end_date,
         "grace_end": advance_date + timedelta(days=grace_days),
         "monthly_rate": monthly_rate,
@@ -503,28 +605,38 @@ def render_assumptions(
     advance_date: date,
     hospital_payment_day: int,
     dc_value: float,
-    installment_count: int,
-    installment_amount: float,
-    total_term_days: int,
     grace_days: int,
     monthly_rate_pct: float,
     present_value: float,
-    contractual_final_date: date,
-    final_date: date,
+    projection: dict[str, object],
 ) -> None:
+    operation_mode = str(projection["operation_mode"])
+    installment_count = int(projection["calculated_installment_count"])
+    installment_amount = float(projection["installment_amount"])
+    real_total_term_days = int(projection["real_total_term_days"])
+    input_total_term_days = projection["input_total_term_days"]
+    contractual_final_date = projection["contractual_final_date"]
+    final_date = projection["final_date"]
+
     st.subheader("Premissas")
     rows = [
         ("Data da antecipação", format_date_pt(advance_date)),
+        ("Modo de definição", operation_mode),
         ("Dia de pagamento do hospital", f"Dia {hospital_payment_day}"),
         ("Direito Creditório (DC)", format_brl(dc_value)),
         ("Parcelas do médico", f"{installment_count} x {format_brl(installment_amount)}"),
-        ("Prazo de referência", f"{total_term_days} dias corridos"),
-        ("Data de referência", format_date_pt(contractual_final_date)),
         ("Liquidação final", format_date_pt(final_date)),
         ("Carência", f"{grace_days} dias corridos"),
         ("Taxa de custo", f"{format_pct(monthly_rate_pct)} ao mês"),
         ("VP creditado ao médico", format_brl(present_value)),
     ]
+    if operation_mode == "Por parcelas":
+        rows.insert(5, ("Prazo total calculado", f"{real_total_term_days} dias corridos"))
+    else:
+        rows.insert(5, ("Prazo total informado", f"{int(input_total_term_days)} dias corridos"))
+        rows.insert(6, ("Parcelas calculadas", str(installment_count)))
+        rows.insert(7, ("Data limite informada", format_date_pt(contractual_final_date)))
+
     for label, value in rows:
         st.markdown(f"<div class='info-row'><span>{label}</span><strong>{value}</strong></div>", unsafe_allow_html=True)
 
@@ -533,7 +645,9 @@ def render_parameters(
     installments: list[Installment],
     radars: list[RadarWindow],
     present_value: float,
+    projection: dict[str, object],
 ) -> None:
+    operation_mode = str(projection["operation_mode"])
     st.subheader("Parâmetros / Fórmulas")
     st.markdown(
         """
@@ -546,8 +660,19 @@ def render_parameters(
     )
     st.markdown(f"**Resultado:** {format_brl(present_value)}")
 
+    if operation_mode == "Por parcelas":
+        st.caption(
+            "Regra do modo: a quantidade informada define os próximos ciclos mensais do hospital; "
+            f"o prazo total real é {projection['real_total_term_days']} dias."
+        )
+    else:
+        st.caption(
+            "Regra do modo: o prazo informado limita os ciclos mensais do hospital; "
+            f"a quantidade calculada é {projection['calculated_installment_count']} parcelas."
+        )
+
     st.markdown("**Datas das parcelas**")
-    st.caption("As parcelas coincidem com o dia mensal de pagamento do hospital.")
+    st.caption("A primeira parcela vence no primeiro pagamento do hospital após a carência; as demais seguem mensalmente.")
     for item in installments:
         st.caption(
             f"Parcela {item.number}: {format_date_pt(item.due_date)} | "
@@ -686,33 +811,74 @@ def main() -> None:
         st.header("Parâmetros da operação")
         advance_date = st.date_input("Data da antecipação", value=date(2026, 4, 18), format="DD/MM/YYYY")
         hospital_payment_day = st.number_input("Dia do mês de pagamento do hospital", min_value=1, max_value=31, value=20)
-        monthly_rate_pct = st.number_input("Taxa de custo da antecipação (% ao mês)", min_value=0.0, value=2.5, step=0.1)
-        total_term_days = st.number_input("Prazo total de pagamento (dias corridos)", min_value=1, value=90, step=1)
-        grace_days = st.number_input("Carência (dias corridos)", min_value=0, max_value=int(total_term_days), value=30, step=1)
-        dc_value = st.number_input("Valor do Direito Creditório (DC)", min_value=0.01, value=100000.0, step=1000.0)
-        installment_count = st.number_input("Quantidade de parcelas de liquidação do médico", min_value=1, max_value=24, value=2, step=1)
-        split_automatically = st.toggle("Dividir DC automaticamente entre as parcelas", value=True)
-        if split_automatically:
-            installment_amount = dc_value / installment_count
-            st.caption(f"Valor por parcela: {format_brl(installment_amount)}")
+        operation_mode = st.radio(
+            "Modo de definição da operação",
+            options=["Por parcelas", "Por prazo total"],
+            horizontal=False,
+        )
+        if operation_mode == "Por parcelas":
+            installment_count_input = st.number_input(
+                "Quantidade de parcelas de liquidação do médico",
+                min_value=1,
+                max_value=60,
+                value=3,
+                step=1,
+            )
+            total_term_days_input = None
+            st.caption("O prazo total será calculado pelo último vencimento hospitalar usado.")
         else:
-            installment_amount = st.number_input("Valor de cada parcela", min_value=0.01, value=50000.0, step=1000.0)
+            total_term_days_input = st.number_input(
+                "Prazo total da operação (dias corridos)",
+                min_value=1,
+                value=93,
+                step=1,
+            )
+            installment_count_input = None
+            st.caption("A quantidade de parcelas será calculada pelos vencimentos dentro do prazo.")
 
-    projection = build_projection(
-        advance_date=advance_date,
-        hospital_payment_day=int(hospital_payment_day),
-        monthly_rate_pct=float(monthly_rate_pct),
-        total_term_days=int(total_term_days),
-        grace_days=int(grace_days),
-        dc_value=float(dc_value),
-        installment_count=int(installment_count),
-        installment_amount=float(installment_amount),
-    )
+        monthly_rate_pct = st.number_input("Taxa de custo da antecipação (% ao mês)", min_value=0.0, value=2.5, step=0.1)
+        grace_days = st.number_input("Carência (dias corridos)", min_value=0, max_value=3650, value=30, step=1)
+        dc_value = st.number_input("Valor do Direito Creditório (DC)", min_value=0.01, value=100000.0, step=1000.0)
+        split_automatically = st.toggle("Dividir DC automaticamente entre as parcelas", value=True)
+        if not split_automatically:
+            installment_amount = st.number_input("Valor de cada parcela", min_value=0.01, value=50000.0, step=1000.0)
+        else:
+            installment_amount = None
+
+    try:
+        projection = build_projection(
+            advance_date=advance_date,
+            hospital_payment_day=int(hospital_payment_day),
+            operation_mode=operation_mode,
+            monthly_rate_pct=float(monthly_rate_pct),
+            total_term_days=int(total_term_days_input) if total_term_days_input is not None else None,
+            grace_days=int(grace_days),
+            dc_value=float(dc_value),
+            installment_count=int(installment_count_input) if installment_count_input is not None else None,
+            installment_amount=float(installment_amount) if installment_amount is not None else None,
+            split_automatically=bool(split_automatically),
+        )
+    except ValueError as exc:
+        st.error(str(exc))
+        st.stop()
 
     present_value = float(projection["present_value"])
     installments = projection["installments"]
     radars = projection["radars"]
     grace_end = projection["grace_end"]
+    installment_count = int(projection["calculated_installment_count"])
+    installment_amount = float(projection["installment_amount"])
+    real_total_term_days = int(projection["real_total_term_days"])
+
+    with st.sidebar:
+        st.divider()
+        st.subheader("Resultado do calendário")
+        if operation_mode == "Por parcelas":
+            st.metric("Prazo total calculado", f"{real_total_term_days} dias")
+        else:
+            st.metric("Quantidade de parcelas calculada", installment_count)
+        st.caption(f"Valor por parcela: {format_brl(installment_amount)}")
+        st.caption(f"Última parcela: {format_date_pt(projection['final_date'])}")
 
     metric_cols = st.columns(4)
     with metric_cols[0]:
@@ -734,17 +900,13 @@ def main() -> None:
             advance_date,
             int(hospital_payment_day),
             float(dc_value),
-            int(installment_count),
-            float(installment_amount),
-            int(total_term_days),
             int(grace_days),
             float(monthly_rate_pct),
             present_value,
-            projection["contractual_final_date"],
-            projection["final_date"],
+            projection,
         )
         st.divider()
-        render_parameters(installments, radars, present_value)
+        render_parameters(installments, radars, present_value, projection)
 
     st.subheader("Comentários / Marcos")
     timeline = build_timeline_comments(advance_date, grace_end, installments, radars)
