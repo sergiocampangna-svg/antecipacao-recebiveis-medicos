@@ -13,6 +13,8 @@ Aplicação em Python com Streamlit, Plotly e Pandas para gerar uma visão execu
 - Quadro de Parâmetros / Fórmulas.
 - Comentários e marcos de datas abaixo do gráfico.
 - Parametrização alternativa da operação: por quantidade de parcelas ou por prazo total.
+- Tabela de liquidação por parcela, com status pago integralmente, pago parcialmente ou não pago.
+- Recalculo automático de cobrança realizada, atraso, mora, saldo exigível e QMM ajustado opcional.
 
 ## Como rodar localmente
 
@@ -51,6 +53,24 @@ Exemplo com antecipação em 18/04/2026 e pagamento hospitalar no dia 20:
 - Por prazo total de 93 dias: 3 parcelas nas mesmas datas.
 
 Se o prazo informado não comportar nenhum ciclo mensal, a aplicação mostra uma mensagem de erro amigável com o primeiro vencimento possível.
+
+### Atraso, mora e pagamento parcial
+
+Cada parcela mantém seu vencimento contratual original. Na tabela de liquidação, o usuário informa o status, a data de pagamento efetivo e o valor pago.
+
+A cobrança esperada segue o cronograma contratual. A cobrança realizada considera apenas pagamentos efetivos. O gap de cobrança é:
+
+```text
+Gap = cobrança esperada - cobrança realizada
+```
+
+Quando há pagamento parcial ou não pagamento, o saldo remanescente vira atraso. A mora é calculada sobre o saldo vencido ou sobre a parcela em atraso, conforme parâmetro escolhido, respeitando os dias de tolerância. A baixa de pagamentos segue a ordem:
+
+```text
+juros/mora -> atraso acumulado -> parcela corrente -> excedente
+```
+
+O QMM ajustado pode ser ativado para aplicar haircut sobre atraso e/ou gap de cobrança.
 
 O valor presente é calculado pela fórmula:
 

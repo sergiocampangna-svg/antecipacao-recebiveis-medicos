@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from calendar import monthrange
 from dataclasses import dataclass
@@ -33,6 +33,17 @@ class RadarWindow:
     start_date: date
     end_date: date
     qmm_value: float
+
+
+@dataclass(frozen=True)
+class DelayParameters:
+    analysis_date: date
+    monthly_late_rate: float
+    fine_fixed: float
+    fine_pct: float
+    tolerance_days: int
+    interest_base: str
+    adjusted_qmm_enabled: bool
 
 
 def format_brl(value: float) -> str:
@@ -262,7 +273,358 @@ def build_collection_curve(
     rows = []
     for current in dates.date:
         accumulated = sum(item.amount for item in installments if current >= item.due_date)
-        rows.append({"date": current, "cobranca": accumulated})
+        rows.append({"date": current, "cobranca_esperada": accumulated})
+    return pd.DataFrame(rows)
+
+
+def default_liquidation_rows(installments: list[Installment]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "Parcela": item.number,
+                "Data de vencimento": item.due_date,
+                "Valor previsto": item.amount,
+                "Status": "Pago integralmente",
+                "Data de pagamento": item.due_date,
+                "Valor pago": item.amount,
+                "Pagamento adicional": 0.0,
+            }
+            for item in installments
+        ]
+    )
+
+
+def build_delay_scenario_rows(
+    installments: list[Installment],
+    delayed_numbers: list[int],
+    status_by_number: dict[int, str],
+    paid_by_number: dict[int, float],
+    payment_date_by_number: dict[int, date],
+    delay_treatment: str = "Manter atraso em aberto",
+) -> pd.DataFrame:
+    rows = default_liquidation_rows(installments)
+    delayed_set = set(delayed_numbers)
+    shortfall_by_number: dict[int, float] = {}
+    for index, row in rows.iterrows():
+        number = int(row["Parcela"])
+        if number not in delayed_set:
+            continue
+
+        status = status_by_number.get(number, "Não pago")
+        amount = float(row["Valor previsto"])
+        rows.loc[index, "Status"] = status
+        rows.loc[index, "Data de pagamento"] = payment_date_by_number.get(number, row["Data de vencimento"])
+        if status == "Pago parcialmente":
+            paid_value = min(max(paid_by_number.get(number, 0.0), 0.0), amount)
+            rows.loc[index, "Valor pago"] = paid_value
+        else:
+            paid_value = 0.0
+            rows.loc[index, "Valor pago"] = 0.0
+        shortfall_by_number[number] = max(amount - paid_value, 0.0)
+
+    if delay_treatment != "Manter atraso em aberto" and shortfall_by_number:
+        total_shortfall = sum(shortfall_by_number.values())
+        future_indexes = [
+            index
+            for index, row in rows.iterrows()
+            if int(row["Parcela"]) > min(shortfall_by_number)
+            and int(row["Parcela"]) not in delayed_set
+        ]
+        if delay_treatment == "Liquidar na próxima parcela":
+            future_indexes = future_indexes[:1]
+
+        if future_indexes:
+            extra_per_installment = total_shortfall / len(future_indexes)
+            for index in future_indexes:
+                rows.loc[index, "Pagamento adicional"] = extra_per_installment
+    return rows
+
+
+def future_regularization_indexes(
+    rows: pd.DataFrame,
+    delayed_numbers: list[int],
+    delay_treatment: str,
+) -> list[int]:
+    if not delayed_numbers:
+        return []
+
+    delayed_set = set(delayed_numbers)
+    first_delayed = min(delayed_numbers)
+    indexes = [
+        index
+        for index, row in rows.iterrows()
+        if int(row["Parcela"]) > first_delayed and int(row["Parcela"]) not in delayed_set
+    ]
+    if delay_treatment == "Liquidar na próxima parcela":
+        return indexes[:1]
+    if delay_treatment == "Distribuir nas parcelas seguintes":
+        return indexes
+    return []
+
+
+def settle_delay_treatment(
+    installments: list[Installment],
+    scenario_rows: pd.DataFrame,
+    params: DelayParameters,
+    delayed_numbers: list[int],
+    delay_treatment: str,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    rows = scenario_rows.copy()
+    liquidation = calculate_liquidation_impacts(installments, rows, params)
+    target_indexes = future_regularization_indexes(rows, delayed_numbers, delay_treatment)
+
+    if delay_treatment == "Manter atraso em aberto" or not target_indexes:
+        return rows, liquidation
+
+    # Recalcula em rodadas curtas porque mora/multa também consomem pagamentos
+    # pela ordem de baixa. O residual é incorporado às parcelas futuras até zerar.
+    for _ in range(6):
+        residual = float(liquidation["saldo_exigivel_total"])
+        if residual <= 0.01:
+            break
+
+        extra_per_target = residual / len(target_indexes)
+        for index in target_indexes:
+            current_extra = float(rows.loc[index, "Pagamento adicional"] or 0.0)
+            rows.loc[index, "Pagamento adicional"] = current_extra + extra_per_target
+
+        liquidation = calculate_liquidation_impacts(installments, rows, params)
+
+    return rows, liquidation
+
+
+def parse_date_value(value: object, fallback: date) -> date:
+    if isinstance(value, date):
+        return value
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return fallback
+    return parsed.date()
+
+
+def normalize_status(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    if "parcial" in raw:
+        return "Pago parcialmente"
+    if "não" in raw or "nao" in raw or "não" in raw:
+        return "Não pago"
+    return "Pago integralmente"
+
+
+def calculate_interest(
+    principal: float,
+    start_date: date,
+    end_date: date,
+    params: DelayParameters,
+) -> float:
+    effective_start = start_date + timedelta(days=params.tolerance_days)
+    if principal <= 0 or end_date <= effective_start:
+        return 0.0
+
+    days = (end_date - effective_start).days
+    daily_rate = (1 + params.monthly_late_rate) ** (1 / 30) - 1
+    return principal * daily_rate * days
+
+
+def normalize_payment_schedule(
+    edited_rows: pd.DataFrame,
+    installments: list[Installment],
+) -> pd.DataFrame:
+    fallback = default_liquidation_rows(installments)
+    if edited_rows is None or edited_rows.empty:
+        return fallback
+
+    normalized = fallback.copy()
+    edited_by_number = {
+        int(row["Parcela"]): row
+        for _, row in edited_rows.iterrows()
+        if pd.notna(row.get("Parcela"))
+    }
+    for index, row in normalized.iterrows():
+        number = int(row["Parcela"])
+        edited = edited_by_number.get(number)
+        if edited is None:
+            continue
+
+        status = normalize_status(edited.get("Status", row["Status"]))
+
+        due_date = row["Data de vencimento"]
+        payment_date = parse_date_value(edited.get("Data de pagamento"), due_date)
+        paid_value = float(edited.get("Valor pago", row["Valor pago"]) or 0)
+        additional_payment = float(edited.get("Pagamento adicional", row.get("Pagamento adicional", 0.0)) or 0)
+        expected_value = float(row["Valor previsto"])
+
+        if status == "Pago integralmente":
+            paid_value = expected_value
+        elif status == "Não pago":
+            paid_value = 0.0
+            payment_date = due_date
+        else:
+            paid_value = min(max(paid_value, 0.0), expected_value)
+        paid_value += max(additional_payment, 0.0)
+
+        normalized.loc[index, "Status"] = status
+        normalized.loc[index, "Data de pagamento"] = payment_date
+        normalized.loc[index, "Valor pago"] = paid_value
+        normalized.loc[index, "Pagamento adicional"] = max(additional_payment, 0.0)
+
+    return normalized
+
+
+def apply_payment_waterfall(
+    payment_amount: float,
+    mora_balance: float,
+    overdue_balance: float,
+    current_due: float,
+) -> tuple[float, float, float, float]:
+    remaining_payment = max(payment_amount, 0.0)
+
+    paid_mora = min(remaining_payment, mora_balance)
+    mora_balance -= paid_mora
+    remaining_payment -= paid_mora
+
+    paid_overdue = min(remaining_payment, overdue_balance)
+    overdue_balance -= paid_overdue
+    remaining_payment -= paid_overdue
+
+    paid_current = min(remaining_payment, current_due)
+    current_due -= paid_current
+    remaining_payment -= paid_current
+
+    return mora_balance, overdue_balance, current_due, remaining_payment
+
+
+def calculate_liquidation_impacts(
+    installments: list[Installment],
+    edited_rows: pd.DataFrame,
+    params: DelayParameters,
+) -> dict[str, object]:
+    schedule = normalize_payment_schedule(edited_rows, installments)
+    rows: list[dict[str, object]] = []
+    payments: list[tuple[date, float]] = []
+
+    overdue_balance = 0.0
+    mora_balance = 0.0
+    fine_balance = 0.0
+    expected_accumulated = 0.0
+    realized_accumulated = 0.0
+    last_interest_date = min(item.due_date for item in installments)
+
+    for item in installments:
+        schedule_row = schedule.loc[schedule["Parcela"] == item.number].iloc[0]
+        status = str(schedule_row["Status"])
+        due_date = item.due_date
+        payment_date = parse_date_value(schedule_row["Data de pagamento"], due_date)
+        paid_value = float(schedule_row["Valor pago"] or 0.0)
+        if status == "Não pago":
+            payment_date = params.analysis_date
+
+        if paid_value > 0:
+            cycle_event_date = max(due_date, min(payment_date, params.analysis_date))
+        else:
+            cycle_event_date = due_date
+        if params.interest_base == "sobre saldo vencido":
+            mora_balance += calculate_interest(overdue_balance, last_interest_date, due_date, params)
+        else:
+            mora_balance += calculate_interest(max(overdue_balance, 0), last_interest_date, due_date, params)
+
+        current_due = item.amount
+        expected_accumulated += item.amount
+
+        if payment_date > due_date and paid_value > 0:
+            interest_base = overdue_balance + current_due
+            if params.interest_base == "sobre parcela em atraso":
+                interest_base = current_due
+            mora_balance += calculate_interest(interest_base, due_date, payment_date, params)
+
+        mora_balance, overdue_balance, current_due, excess_payment = apply_payment_waterfall(
+            paid_value,
+            mora_balance,
+            overdue_balance,
+            current_due,
+        )
+
+        unpaid_after_payment = current_due
+        if unpaid_after_payment > 0 and params.analysis_date > due_date + timedelta(days=params.tolerance_days):
+            fine_balance += params.fine_fixed + unpaid_after_payment * params.fine_pct
+
+        overdue_balance += unpaid_after_payment
+        realized_accumulated += paid_value
+        if paid_value > 0:
+            payments.append((payment_date, paid_value))
+
+        last_interest_date = max(cycle_event_date, due_date)
+        saldo_exigivel = overdue_balance + mora_balance + fine_balance
+        rows.append(
+            {
+                "Parcela": item.number,
+                "Data de vencimento": due_date,
+                "Valor previsto": item.amount,
+                "Status": status,
+                "Data de pagamento": payment_date if paid_value > 0 else None,
+                "Valor pago": paid_value,
+                "Saldo em atraso": overdue_balance,
+                "Mora": mora_balance,
+                "Multa": fine_balance,
+                "Saldo exigível atualizado": saldo_exigivel,
+                "Gap de cobrança": expected_accumulated - realized_accumulated,
+                "Excedente amortizado": excess_payment,
+                "Pagamento adicional": float(schedule_row.get("Pagamento adicional", 0.0) or 0.0),
+            }
+        )
+
+    final_interest_date = max(params.analysis_date, last_interest_date)
+    if params.interest_base == "sobre saldo vencido":
+        mora_balance += calculate_interest(overdue_balance, last_interest_date, final_interest_date, params)
+    fine_and_mora = mora_balance + fine_balance
+    expected_total = sum(item.amount for item in installments)
+    realized_total = sum(amount for _, amount in payments)
+    gap_total = max(expected_total - realized_total, 0.0)
+
+    if rows:
+        rows[-1]["Mora"] = mora_balance
+        rows[-1]["Saldo exigível atualizado"] = overdue_balance + fine_and_mora
+
+    return {
+        "input_table": schedule,
+        "result_table": pd.DataFrame(rows),
+        "payments": payments,
+        "expected_total": expected_total,
+        "realized_total": realized_total,
+        "gap_total": gap_total,
+        "overdue_total": overdue_balance,
+        "mora_total": mora_balance,
+        "fine_total": fine_balance,
+        "saldo_exigivel_total": overdue_balance + fine_and_mora,
+    }
+
+
+def build_realized_collection_curve(
+    dates: pd.DatetimeIndex,
+    payments: list[tuple[date, float]],
+) -> pd.DataFrame:
+    rows = []
+    for current in dates.date:
+        accumulated = sum(amount for payment_date, amount in payments if current >= payment_date)
+        rows.append({"date": current, "cobranca_realizada": accumulated})
+    return pd.DataFrame(rows)
+
+
+def build_saldo_exigivel_curve(
+    dates: pd.DatetimeIndex,
+    result_table: pd.DataFrame,
+) -> pd.DataFrame:
+    rows = []
+    if result_table.empty:
+        return pd.DataFrame({"date": dates.date, "saldo_exigivel_curve": 0.0})
+
+    events = [
+        (parse_date_value(row["Data de vencimento"], dates.date[0]), float(row["Saldo exigível atualizado"]))
+        for _, row in result_table.iterrows()
+    ]
+    for current in dates.date:
+        applicable = [value for event_date, value in events if current >= event_date]
+        rows.append({"date": current, "saldo_exigivel_curve": applicable[-1] if applicable else 0.0})
     return pd.DataFrame(rows)
 
 
@@ -403,6 +765,9 @@ def build_projection(
     )
     collection_curve = build_collection_curve(dates, installments)
     df = qmm_curve.merge(collection_curve, on="date")
+    df["cobranca_realizada"] = df["cobranca_esperada"]
+    df["gap_cobranca"] = 0.0
+    df["qmm_ajustado"] = df["qmm"]
     df["dc"] = dc_value
     return {
         "df": df,
@@ -422,6 +787,54 @@ def build_projection(
         "grace_end": advance_date + timedelta(days=grace_days),
         "monthly_rate": monthly_rate,
     }
+
+
+def apply_liquidation_to_projection(
+    projection: dict[str, object],
+    liquidation: dict[str, object],
+    params: DelayParameters,
+) -> dict[str, object]:
+    df = projection["df"].copy()
+    payment_dates = [payment_date for payment_date, _ in liquidation["payments"]]
+    desired_end = max([params.analysis_date, projection["chart_end_date"], *payment_dates])
+    if desired_end > projection["chart_end_date"]:
+        dates = pd.date_range(projection["df"]["date"].min(), desired_end, freq="D")
+        qmm_curve = build_qmm_curve(
+            dates,
+            projection["df"]["date"].min(),
+            projection["final_date"],
+            projection["present_value"],
+            float(projection["df"]["dc"].iloc[0]),
+            (projection["grace_end"] - projection["df"]["date"].min()).days,
+            projection["radars"],
+        )
+        collection_curve = build_collection_curve(dates, projection["installments"])
+        df = qmm_curve.merge(collection_curve, on="date")
+        df["dc"] = float(projection["df"]["dc"].iloc[0])
+
+    realized_curve = build_realized_collection_curve(pd.DatetimeIndex(pd.to_datetime(df["date"])), liquidation["payments"])
+    df = df.drop(columns=["cobranca_realizada", "gap_cobranca", "qmm_ajustado"], errors="ignore").merge(
+        realized_curve,
+        on="date",
+        how="left",
+    )
+    df["cobranca_realizada"] = df["cobranca_realizada"].fillna(0.0)
+    df["gap_cobranca"] = (df["cobranca_esperada"] - df["cobranca_realizada"]).clip(lower=0)
+    saldo_curve = build_saldo_exigivel_curve(pd.DatetimeIndex(pd.to_datetime(df["date"])), liquidation["result_table"])
+    df = df.merge(saldo_curve, on="date", how="left")
+    df["saldo_exigivel_curve"] = df["saldo_exigivel_curve"].fillna(0.0)
+
+    if params.adjusted_qmm_enabled:
+        df["qmm_ajustado"] = (df["qmm"] - df["saldo_exigivel_curve"]).clip(lower=0)
+    else:
+        df["qmm_ajustado"] = df["qmm"]
+
+    adjusted_projection = dict(projection)
+    adjusted_projection["df"] = df
+    adjusted_projection["liquidation"] = liquidation
+    adjusted_projection["delay_params"] = params
+    adjusted_projection["chart_end_date"] = desired_end
+    return adjusted_projection
 
 
 def money_hover(values: pd.Series) -> list[str]:
@@ -471,38 +884,52 @@ def build_chart(
             line=dict(width=0),
             layer="below",
         )
-        fig.add_annotation(
-            x=radar.start_date.isoformat(),
-            y=1.01,
-            xref="x",
-            yref="paper",
-            text=f"Radar {radar.month_label}",
-            showarrow=False,
-            xanchor="left",
-            yanchor="bottom",
-            font=dict(size=9, color="#215e96"),
-        )
 
     fig.add_trace(
         go.Scatter(
             x=df["date"],
             y=df["qmm"],
             mode="lines",
-            name="Curva QMM",
+            name="Curva QMM Ref.",
             line=dict(color=QMM_COLOR, width=4),
             customdata=money_hover(df["qmm"]),
             hovertemplate="%{x|%d/%m/%Y}<br>QMM: %{customdata}<extra></extra>",
         )
     )
+    if "delay_params" in projection and projection["delay_params"].adjusted_qmm_enabled:
+        fig.add_trace(
+            go.Scatter(
+                x=df["date"],
+                y=df["qmm_ajustado"],
+                mode="lines",
+                name="QMM Ajustado",
+                line=dict(color="#7c3aed", width=3, dash="dash"),
+                customdata=money_hover(df["qmm_ajustado"]),
+                hovertemplate="%{x|%d/%m/%Y}<br>QMM ajustado: %{customdata}<extra></extra>",
+            )
+        )
     fig.add_trace(
         go.Scatter(
             x=df["date"],
-            y=df["cobranca"],
+            y=df["cobranca_esperada"],
             mode="lines",
-            name="Curva Cobrança",
+            name="Cobrança Esperada",
             line=dict(color=COBRANCA_COLOR, width=3, shape="hv"),
-            customdata=money_hover(df["cobranca"]),
-            hovertemplate="%{x|%d/%m/%Y}<br>Cobrança: %{customdata}<extra></extra>",
+            customdata=money_hover(df["cobranca_esperada"]),
+            hovertemplate="%{x|%d/%m/%Y}<br>Cobrança esperada: %{customdata}<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["date"],
+            y=df["cobranca_realizada"],
+            mode="lines",
+            name="Cobrança Realizada",
+            line=dict(color="#2a9d8f", width=3, shape="hv"),
+            fill="tonexty",
+            fillcolor="rgba(242, 140, 40, 0.10)",
+            customdata=money_hover(df["cobranca_realizada"]),
+            hovertemplate="%{x|%d/%m/%Y}<br>Cobrança realizada: %{customdata}<extra></extra>",
         )
     )
     fig.add_trace(
@@ -523,43 +950,23 @@ def build_chart(
         add_reference_line(fig, item.due_date, COBRANCA_COLOR)
     add_reference_line(fig, final_date, DC_COLOR)
 
-    label_points = [
-        (advance_date, present_value, f"VP {format_brl(present_value)}", QMM_COLOR, 52),
-        (final_date, dc_value, f"DC {format_brl(dc_value)}", DC_COLOR, -52),
-    ]
-
-    for x_value, y_value, text, color, ay in label_points:
-        fig.add_annotation(
-            x=x_value.isoformat(),
-            y=y_value,
-            text=text,
-            showarrow=True,
-            arrowhead=2,
-            arrowsize=1,
-            arrowwidth=1,
-            arrowcolor=color,
-            ax=0,
-            ay=ay,
-            font=dict(size=11, color=color),
-            bgcolor="rgba(255,255,255,0.88)",
-            bordercolor=color,
-            borderwidth=1,
-        )
-
-    y_max = max(dc_value, float(df[["qmm", "cobranca", "dc"]].max().max())) * 1.12
+    y_columns = ["qmm", "qmm_ajustado", "cobranca_esperada", "cobranca_realizada", "dc"]
+    y_max = max(dc_value, float(df[y_columns].max().max())) * 1.12
     fig.update_layout(
         height=620,
         template="plotly_white",
-        margin=dict(l=24, r=24, t=80, b=46),
+        margin=dict(l=24, r=24, t=128, b=48),
         title=dict(
             text="Simulação Executiva de Antecipação de Recebíveis Médicos",
-            font=dict(size=22, color="#1f2937"),
+            font=dict(size=20, color="#1f2937"),
             x=0.01,
+            y=0.97,
+            yanchor="top",
         ),
         legend=dict(
             orientation="h",
-            yanchor="bottom",
-            y=1.02,
+            yanchor="top",
+            y=1.10,
             xanchor="left",
             x=0,
             font=dict(size=12),
@@ -600,7 +1007,6 @@ def render_metric_card(label: str, value: str, helper: str = "") -> None:
         unsafe_allow_html=True,
     )
 
-
 def render_assumptions(
     advance_date: date,
     hospital_payment_day: int,
@@ -617,6 +1023,7 @@ def render_assumptions(
     input_total_term_days = projection["input_total_term_days"]
     contractual_final_date = projection["contractual_final_date"]
     final_date = projection["final_date"]
+    liquidation = projection.get("liquidation", {})
 
     st.subheader("Premissas")
     rows = [
@@ -636,11 +1043,17 @@ def render_assumptions(
         rows.insert(5, ("Prazo total informado", f"{int(input_total_term_days)} dias corridos"))
         rows.insert(6, ("Parcelas calculadas", str(installment_count)))
         rows.insert(7, ("Data limite informada", format_date_pt(contractual_final_date)))
+    if liquidation:
+        rows.extend(
+            [
+                ("Atraso acumulado", format_brl(float(liquidation["overdue_total"]))),
+                ("Mora acumulada", format_brl(float(liquidation["mora_total"]))),
+                ("Saldo exigível", format_brl(float(liquidation["saldo_exigivel_total"]))),
+            ]
+        )
 
     for label, value in rows:
         st.markdown(f"<div class='info-row'><span>{label}</span><strong>{value}</strong></div>", unsafe_allow_html=True)
-
-
 def render_parameters(
     installments: list[Installment],
     radars: list[RadarWindow],
@@ -686,6 +1099,14 @@ def render_parameters(
             f"{format_date_pt(radar.end_date)} | QMM {format_brl(radar.qmm_value)}"
         )
     st.info("No primeiro dia do radar, o QMM assume o valor futuro projetado até o fim da janela e fica limitado ao DC.")
+    if "delay_params" in projection:
+        params = projection["delay_params"]
+        st.markdown("**Atraso / Mora**")
+        st.caption(f"Mora: {format_pct(params.monthly_late_rate * 100)} ao mês, calculada por juros simples diários.")
+        st.caption("Saldo exigível = atraso acumulado + mora + multa.")
+        st.caption("Gap = cobrança esperada - cobrança realizada.")
+        if params.adjusted_qmm_enabled:
+            st.caption("QMM ajustado = QMM referência - saldo exigível em aberto.")
 
 
 def build_timeline_comments(
@@ -693,6 +1114,7 @@ def build_timeline_comments(
     grace_end: date,
     installments: list[Installment],
     radars: list[RadarWindow],
+    liquidation: dict[str, object] | None = None,
 ) -> pd.DataFrame:
     rows = [
         {
@@ -715,11 +1137,24 @@ def build_timeline_comments(
             }
         )
     for item in installments:
+        payment_comment = f"Cobrança acumulada sobe em {format_brl(item.amount)}."
+        if liquidation:
+            table = liquidation["result_table"]
+            row = table.loc[table["Parcela"] == item.number]
+            if not row.empty:
+                status = str(row.iloc[0]["Status"])
+                paid = float(row.iloc[0]["Valor pago"])
+                overdue = float(row.iloc[0]["Saldo em atraso"])
+                mora = float(row.iloc[0]["Mora"])
+                payment_comment = (
+                    f"{status}: pago {format_brl(paid)}; "
+                    f"atraso acumulado {format_brl(overdue)}; mora {format_brl(mora)}."
+                )
         rows.append(
             {
                 "Data": format_date_pt(item.due_date),
                 "Marco": f"Vencimento da parcela {item.number}",
-                "Comentário": f"Cobrança acumulada sobe em {format_brl(item.amount)}.",
+                "Comentário": payment_comment,
             }
         )
     return pd.DataFrame(rows)
@@ -742,26 +1177,35 @@ def inject_styles() -> None:
             border: 1px solid #d9e0ea;
             border-left: 4px solid #c1121f;
             border-radius: 8px;
-            padding: 14px 16px;
+            padding: 12px 14px;
             background: #ffffff;
-            min-height: 92px;
+            height: 104px;
             box-shadow: 0 6px 20px rgba(31, 41, 55, 0.05);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            overflow: hidden;
         }
         .metric-card span {
             display: block;
             color: #64748b;
-            font-size: 0.82rem;
+            font-size: 0.74rem;
             font-weight: 700;
             text-transform: uppercase;
+            line-height: 1.15;
+            min-height: 1.7rem;
         }
         .metric-card strong {
             display: block;
             color: #172033;
-            font-size: 1.25rem;
-            margin-top: 5px;
+            font-size: 1.08rem;
+            line-height: 1.2;
+            white-space: nowrap;
         }
         .metric-card small {
             color: #64748b;
+            font-size: 0.76rem;
+            line-height: 1.15;
         }
         .info-row {
             display: flex;
@@ -869,6 +1313,7 @@ def main() -> None:
     installment_count = int(projection["calculated_installment_count"])
     installment_amount = float(projection["installment_amount"])
     real_total_term_days = int(projection["real_total_term_days"])
+    anticipation_cost = sum(item.amount for item in installments) - present_value
 
     with st.sidebar:
         st.divider()
@@ -880,38 +1325,203 @@ def main() -> None:
         st.caption(f"Valor por parcela: {format_brl(installment_amount)}")
         st.caption(f"Última parcela: {format_date_pt(projection['final_date'])}")
 
-    metric_cols = st.columns(4)
-    with metric_cols[0]:
-        render_metric_card("VP creditado", format_brl(present_value), "valor líquido projetado")
-    with metric_cols[1]:
-        render_metric_card("Direito Creditório", format_brl(float(dc_value)), "limite do QMM")
-    with metric_cols[2]:
-        render_metric_card("Radar mensal", f"{len(radars)} janelas", "5 dias úteis antes/depois")
-    with metric_cols[3]:
-        render_metric_card("Liquidação final", format_date_pt(projection["final_date"]), "ajustada ao hospital")
+    tab_main, tab_delay = st.tabs(["Operação prevista", "Simulação de atraso"])
 
-    chart_col, side_col = st.columns([2.45, 1], gap="large")
-    with chart_col:
-        fig = build_chart(projection, advance_date, float(dc_value))
-        st.plotly_chart(fig, use_container_width=True)
+    with tab_main:
+        metric_cols = st.columns(5)
+        with metric_cols[0]:
+            render_metric_card("VP creditado", format_brl(present_value), "valor líquido projetado")
+        with metric_cols[1]:
+            render_metric_card("Custo da antecipação", format_brl(anticipation_cost), "DC/parcelas - VP")
+        with metric_cols[2]:
+            render_metric_card("Direito Creditório", format_brl(float(dc_value)), "limite do QMM")
+        with metric_cols[3]:
+            render_metric_card("Radar mensal", f"{len(radars)} janelas", "5 dias úteis antes/depois")
+        with metric_cols[4]:
+            render_metric_card("Liquidação final", format_date_pt(projection["final_date"]), "calendário hospitalar")
 
-    with side_col:
-        render_assumptions(
-            advance_date,
-            int(hospital_payment_day),
-            float(dc_value),
-            int(grace_days),
-            float(monthly_rate_pct),
-            present_value,
-            projection,
+        chart_col, side_col = st.columns([2.45, 1], gap="large")
+        with chart_col:
+            fig = build_chart(projection, advance_date, float(dc_value))
+            st.plotly_chart(fig, use_container_width=True, key="chart_operacao_prevista")
+
+        with side_col:
+            render_assumptions(
+                advance_date,
+                int(hospital_payment_day),
+                float(dc_value),
+                int(grace_days),
+                float(monthly_rate_pct),
+                present_value,
+                projection,
+            )
+            st.divider()
+            render_parameters(installments, radars, present_value, projection)
+
+        st.subheader("Comentários / Marcos")
+        timeline = build_timeline_comments(advance_date, grace_end, installments, radars)
+        st.dataframe(timeline, use_container_width=True, hide_index=True)
+
+    with tab_delay:
+        st.caption(
+            "Use esta aba para testar deterioração da liquidação. A operação prevista permanece preservada na primeira aba."
         )
-        st.divider()
-        render_parameters(installments, radars, present_value, projection)
+        param_cols = st.columns(4)
+        with param_cols[0]:
+            analysis_date = st.date_input("Data de análise", value=date.today(), format="DD/MM/YYYY")
+            monthly_late_rate_pct = st.number_input("Taxa de mora (% ao mês)", min_value=0.0, value=1.0, step=0.1)
+        with param_cols[1]:
+            fine_fixed = st.number_input("Multa fixa por atraso", min_value=0.0, value=0.0, step=100.0)
+            fine_pct = st.number_input("Multa percentual por atraso (%)", min_value=0.0, value=0.0, step=0.1)
+        with param_cols[2]:
+            tolerance_days = st.number_input("Dias de tolerância", min_value=0, max_value=60, value=0, step=1)
+            interest_base = st.selectbox("Base do juro", ["sobre saldo vencido", "sobre parcela em atraso"])
+        with param_cols[3]:
+            adjusted_qmm_enabled = st.toggle("Exibir QMM ajustado", value=True)
+            st.caption("Mora calculada por juros simples diários.")
 
-    st.subheader("Comentários / Marcos")
-    timeline = build_timeline_comments(advance_date, grace_end, installments, radars)
-    st.dataframe(timeline, use_container_width=True, hide_index=True)
+        st.info(
+            "Premissas do atraso: parcelas não selecionadas são pagas integralmente no vencimento; "
+            "mora = saldo vencido x taxa diária equivalente; saldo exigível = atraso + mora + multa; "
+            "QMM ajustado = QMM de referência - saldo exigível em aberto."
+        )
 
+        delay_params = DelayParameters(
+            analysis_date=analysis_date,
+            monthly_late_rate=float(monthly_late_rate_pct) / 100,
+            fine_fixed=float(fine_fixed),
+            fine_pct=float(fine_pct) / 100,
+            tolerance_days=int(tolerance_days),
+            interest_base=interest_base,
+            adjusted_qmm_enabled=bool(adjusted_qmm_enabled),
+        )
+
+        st.subheader("Configuração do cenário de atraso")
+        installment_labels = {
+            f"Parcela {item.number} - {format_date_pt(item.due_date)} - {format_brl(item.amount)}": item.number
+            for item in installments
+        }
+        selected_labels = st.multiselect(
+            "Parcelas com atraso",
+            options=list(installment_labels.keys()),
+            help="Todas as parcelas não selecionadas serão consideradas pagas integralmente no vencimento.",
+        )
+        delayed_numbers = [installment_labels[label] for label in selected_labels]
+        delay_treatment = st.selectbox(
+            "Tratamento do atraso",
+            [
+                "Manter atraso em aberto",
+                "Liquidar na próxima parcela",
+                "Distribuir nas parcelas seguintes",
+            ],
+            help="Define como o principal em atraso será incorporado aos pagamentos futuros da simulação.",
+        )
+
+        status_by_number: dict[int, str] = {}
+        paid_by_number: dict[int, float] = {}
+        payment_date_by_number: dict[int, date] = {}
+        if delayed_numbers:
+            st.caption("Configure apenas as parcelas em atraso. As demais ficam pagas integralmente no vencimento.")
+        else:
+            st.info("Nenhuma parcela marcada como atrasada. O cenário alternativo replica a operação prevista.")
+
+        for number in delayed_numbers:
+            item = next(installment for installment in installments if installment.number == number)
+            with st.container(border=True):
+                st.markdown(f"**Parcela {item.number} | {format_date_pt(item.due_date)} | {format_brl(item.amount)}**")
+                c1, c2, c3 = st.columns([1.2, 1, 1])
+                with c1:
+                    status = st.selectbox(
+                        "Tipo de atraso",
+                        ["Não pago", "Pago parcialmente"],
+                        key=f"delay_status_{number}",
+                    )
+                with c2:
+                    payment_date = st.date_input(
+                        "Data de pagamento / análise",
+                        value=max(item.due_date, analysis_date),
+                        format="DD/MM/YYYY",
+                        key=f"delay_payment_date_{number}",
+                    )
+                with c3:
+                    if status == "Pago parcialmente":
+                        paid_value = st.number_input(
+                            "Valor pago",
+                            min_value=0.0,
+                            max_value=float(item.amount),
+                            value=float(item.amount) / 2,
+                            step=1000.0,
+                            key=f"delay_paid_{number}",
+                        )
+                    else:
+                        paid_value = 0.0
+                        st.metric("Valor pago", format_brl(0.0))
+                status_by_number[number] = status
+                paid_by_number[number] = float(paid_value)
+                payment_date_by_number[number] = payment_date
+
+        edited_table = build_delay_scenario_rows(
+            installments,
+            delayed_numbers,
+            status_by_number,
+            paid_by_number,
+            payment_date_by_number,
+            delay_treatment,
+        )
+        edited_table, liquidation = settle_delay_treatment(
+            installments,
+            edited_table,
+            delay_params,
+            delayed_numbers,
+            delay_treatment,
+        )
+        if delay_treatment != "Manter atraso em aberto" and delayed_numbers:
+            target_indexes = future_regularization_indexes(edited_table, delayed_numbers, delay_treatment)
+            if not target_indexes:
+                st.warning("Não há parcelas futuras disponíveis para liquidar ou distribuir o atraso.")
+        risk_projection = apply_liquidation_to_projection(projection, liquidation, delay_params)
+
+        risk_cols = st.columns(5)
+        with risk_cols[0]:
+            render_metric_card("Atraso acumulado", format_brl(float(liquidation["overdue_total"])), "saldo vencido")
+        with risk_cols[1]:
+            render_metric_card("Mora acumulada", format_brl(float(liquidation["mora_total"])), "juros por atraso")
+        with risk_cols[2]:
+            render_metric_card("Saldo exigível", format_brl(float(liquidation["saldo_exigivel_total"])), "atraso + mora + multa")
+        with risk_cols[3]:
+            render_metric_card("Cobrança realizada", format_brl(float(liquidation["realized_total"])), "pagamentos efetivos")
+        with risk_cols[4]:
+            render_metric_card("Gap de cobrança", format_brl(float(liquidation["gap_total"])), "esperada - realizada")
+
+        st.plotly_chart(
+            build_chart(risk_projection, advance_date, float(dc_value)),
+            use_container_width=True,
+            key="chart_simulacao_atraso",
+        )
+
+        result_table = liquidation["result_table"].copy()
+        money_columns = [
+            "Valor previsto",
+            "Valor pago",
+            "Saldo em atraso",
+            "Mora",
+            "Multa",
+            "Saldo exigível atualizado",
+            "Gap de cobrança",
+            "Pagamento adicional",
+            "Excedente amortizado",
+        ]
+        for col in money_columns:
+            result_table[col] = result_table[col].map(format_brl)
+        result_table["Data de vencimento"] = result_table["Data de vencimento"].map(format_date_pt)
+        result_table["Data de pagamento"] = result_table["Data de pagamento"].apply(
+            lambda value: "-" if value is None or pd.isna(value) else format_date_pt(value)
+        )
+        st.dataframe(result_table, use_container_width=True, hide_index=True)
+
+        risk_timeline = build_timeline_comments(advance_date, grace_end, installments, radars, liquidation)
+        st.dataframe(risk_timeline, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
+
