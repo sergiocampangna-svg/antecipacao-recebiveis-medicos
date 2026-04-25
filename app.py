@@ -1470,6 +1470,7 @@ def main() -> None:
         status_by_number: dict[int, str] = {}
         paid_by_number: dict[int, float] = {}
         payment_date_by_number: dict[int, date] = {}
+        apuration_placeholders = {}
         if delayed_numbers:
             st.caption("Configure apenas as parcelas em atraso.")
         else:
@@ -1496,7 +1497,7 @@ def main() -> None:
                         )
                     else:
                         payment_date = item.due_date
-                        st.metric("Apuração", "Data-base automática")
+                        apuration_placeholders[number] = st.empty()
                 with c3:
                     if status == "Pago parcialmente":
                         paid_value = st.number_input(
@@ -1524,6 +1525,18 @@ def main() -> None:
         )
         automatic_analysis_date = calculate_automatic_analysis_date(edited_table, installments)
         analysis_date = manual_analysis_date if use_manual_analysis_date else automatic_analysis_date
+        analysis_date_source = "data-base manual" if use_manual_analysis_date else "data-base automática"
+        for placeholder in apuration_placeholders.values():
+            placeholder.markdown(
+                f"""
+                <div style="border:1px solid #d9e0ea;border-radius:8px;padding:9px 11px;background:#ffffff;">
+                    <span style="display:block;color:#64748b;font-size:0.72rem;font-weight:700;line-height:1.1;">Apuração</span>
+                    <strong style="display:block;color:#172033;font-size:0.98rem;line-height:1.25;margin-top:3px;">{format_date_pt(analysis_date)}</strong>
+                    <small style="display:block;color:#64748b;font-size:0.72rem;line-height:1.15;">{analysis_date_source}</small>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         delay_params = DelayParameters(
             analysis_date=analysis_date,
             monthly_late_rate=float(monthly_late_rate_pct) / 100,
