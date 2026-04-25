@@ -52,6 +52,10 @@ def format_brl(value: float) -> str:
     return f"{BRL_PREFIX}{formatted}"
 
 
+def format_brl_markdown(value: float) -> str:
+    return format_brl(value).replace("$", r"\$")
+
+
 def format_pct(value: float) -> str:
     return f"{value:.2f}%".replace(".", ",")
 
@@ -212,6 +216,56 @@ def calculate_present_value(
             )
         )
     return sum(item.present_value for item in installments), installments
+
+
+def calculate_operational_costs(
+    transaction_value: float,
+    operational_variable_pct: float,
+    operational_fixed_cost: float,
+) -> dict[str, float]:
+    variable_cost = transaction_value * (operational_variable_pct / 100)
+    fixed_cost = operational_fixed_cost
+    total_cost = variable_cost + fixed_cost
+    return {
+        "operational_variable_cost": variable_cost,
+        "operational_fixed_cost": fixed_cost,
+        "operational_total_cost": total_cost,
+    }
+
+
+def calculate_monthly_anticipation_rate_pct(
+    monthly_interest_rate_pct: float,
+    operational_variable_pct: float,
+    operational_fixed_cost: float,
+    transaction_value: float,
+) -> float:
+    fixed_cost_pct = (operational_fixed_cost / transaction_value) * 100 if transaction_value > 0 else 0
+    return monthly_interest_rate_pct + operational_variable_pct + fixed_cost_pct
+
+
+def calculate_anticipation_cost_breakdown(
+    gross_value: float,
+    financial_present_value: float,
+    operational_variable_pct: float,
+    operational_fixed_cost: float,
+) -> dict[str, float]:
+    operational_costs = calculate_operational_costs(
+        gross_value,
+        operational_variable_pct,
+        operational_fixed_cost,
+    )
+    net_disbursement = financial_present_value - operational_costs["operational_total_cost"]
+    financial_cost = gross_value - financial_present_value
+    total_cost = gross_value - net_disbursement
+    equivalent_rate = total_cost / gross_value if gross_value > 0 else 0.0
+    return {
+        "financial_present_value": financial_present_value,
+        "financial_cost": financial_cost,
+        "net_disbursement": net_disbursement,
+        "anticipation_cost": total_cost,
+        "equivalent_operation_rate": equivalent_rate,
+        **operational_costs,
+    }
 
 
 def projected_qmm_value(
@@ -750,6 +804,8 @@ def build_projection(
     monthly_rate_pct: float,
     grace_days: int,
     dc_value: float,
+    operational_variable_pct: float = 0.0,
+    operational_fixed_cost: float = 0.0,
     total_term_days: int | None = None,
     installment_count: int | None = None,
     installment_amount: float | None = None,
@@ -792,12 +848,30 @@ def build_projection(
         raise ValueError("Informe um valor de parcela maior que zero.")
 
     final_date = max(installment_dates)
-    present_value, installments = calculate_present_value(
+    financial_present_value, installments = calculate_present_value(
         advance_date,
         installment_dates,
         installment_amount,
         monthly_rate,
     )
+    cost_breakdown = calculate_anticipation_cost_breakdown(
+        dc_value,
+        financial_present_value,
+        operational_variable_pct,
+        operational_fixed_cost,
+    )
+    anticipation_monthly_rate_pct = calculate_monthly_anticipation_rate_pct(
+        monthly_rate_pct,
+        operational_variable_pct,
+        operational_fixed_cost,
+        dc_value,
+    )
+    present_value = cost_breakdown["net_disbursement"]
+    if present_value <= 0:
+        raise ValueError(
+            "Os custos da operação tornam o valor líquido menor ou igual a zero. "
+            "Reduza os custos operacionais ou a taxa de juros."
+        )
     payment_dates = calculate_payment_dates(min(installment_dates), final_date, hospital_payment_day)
     radars = calculate_radar_windows(
         payment_dates,
@@ -827,6 +901,11 @@ def build_projection(
     return {
         "df": df,
         "present_value": present_value,
+        "financial_present_value": financial_present_value,
+        "operational_variable_pct": operational_variable_pct,
+        "operational_fixed_cost_input": operational_fixed_cost,
+        "anticipation_monthly_rate_pct": anticipation_monthly_rate_pct,
+        **cost_breakdown,
         "installments": installments,
         "payment_dates": payment_dates,
         "radars": radars,
@@ -1089,8 +1168,14 @@ def render_assumptions(
         ("Parcelas do médico", f"{installment_count} x {format_brl(installment_amount)}"),
         ("Liquidação final", format_date_pt(final_date)),
         ("Carência", f"{grace_days} dias corridos"),
-        ("Taxa de custo", f"{format_pct(monthly_rate_pct)} ao mês"),
-        ("VP creditado ao médico", format_brl(present_value)),
+        ("Taxa de juros / capital", f"{format_pct(monthly_rate_pct)} ao mês"),
+        ("Taxa de antecipação mensal", f"{format_pct(float(projection['anticipation_monthly_rate_pct']))} ao mês"),
+        ("VP financeiro", format_brl(float(projection["financial_present_value"]))),
+        ("Desconto financeiro", format_brl(float(projection["financial_cost"]))),
+        ("Custo operacional variável", format_brl(float(projection["operational_variable_cost"]))),
+        ("Custo operacional fixo", format_brl(float(projection["operational_fixed_cost"]))),
+        ("Valor líquido creditado", format_brl(present_value)),
+        ("Taxa de antecipação total", f"{format_pct(float(projection['equivalent_operation_rate']) * 100)} da operação"),
     ]
     if operation_mode == "Por parcelas":
         rows.insert(5, ("Prazo total calculado", f"{real_total_term_days} dias corridos"))
@@ -1126,7 +1211,20 @@ def render_parameters(
         """,
         unsafe_allow_html=True,
     )
-    st.markdown(f"**Resultado:** {format_brl(present_value)}")
+    st.markdown(f"**VP financeiro:** {format_brl(float(projection['financial_present_value']))}")
+    st.caption(
+        "Valor líquido = VP financeiro - custo operacional variável - custo operacional fixo."
+    )
+    st.caption(
+        f"Desconto financeiro = DC - VP financeiro = {format_brl_markdown(float(projection['financial_cost']))}."
+    )
+    st.caption(
+        "Taxa de antecipação mensal = juros/capital + custo variável + custo fixo convertido em % do DC."
+    )
+    st.caption(
+        f"Taxa de antecipação total = custo total / DC = {format_pct(float(projection['equivalent_operation_rate']) * 100)}."
+    )
+    st.markdown(f"**Valor líquido creditado:** {format_brl(present_value)}")
 
     if operation_mode == "Por parcelas":
         st.caption(
@@ -1406,6 +1504,26 @@ def inject_styles() -> None:
         .doctor-summary strong {
             color: #172033;
         }
+        .doctor-cost-config {
+            border: 1px solid #edf2f7;
+            border-radius: 8px;
+            background: #ffffff;
+            padding: 8px 10px;
+            margin: 8px 0 6px;
+        }
+        .doctor-cost-config div {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 3px 0;
+            font-size: 0.82rem;
+            color: #64748b;
+            line-height: 1.2;
+        }
+        .doctor-cost-config strong {
+            color: #172033;
+            white-space: nowrap;
+        }
         .doctor-installment-row {
             display: flex;
             gap: 9px;
@@ -1512,6 +1630,8 @@ def calculate_doctor_offer(
     request_date: date,
     hospital_payment_day: int,
     monthly_rate_pct: float,
+    operational_variable_pct: float,
+    operational_fixed_cost: float,
     grace_days: int,
     requested_value: float,
     installment_count: int,
@@ -1523,24 +1643,41 @@ def calculate_doctor_offer(
         installment_count=installment_count,
     )
     installment_amount = requested_value / installment_count
-    present_value, installments = calculate_present_value(
+    financial_present_value, installments = calculate_present_value(
         request_date,
         installment_dates,
         installment_amount,
         monthly_rate_pct / 100,
     )
+    cost_breakdown = calculate_anticipation_cost_breakdown(
+        requested_value,
+        financial_present_value,
+        operational_variable_pct,
+        operational_fixed_cost,
+    )
+    anticipation_monthly_rate_pct = calculate_monthly_anticipation_rate_pct(
+        monthly_rate_pct,
+        operational_variable_pct,
+        operational_fixed_cost,
+        requested_value,
+    )
+    if cost_breakdown["net_disbursement"] <= 0:
+        raise ValueError("Os custos da operação tornam o valor líquido menor ou igual a zero.")
     return {
         "request_date": request_date,
         "hospital_payment_day": hospital_payment_day,
         "monthly_rate_pct": monthly_rate_pct,
+        "operational_variable_pct": operational_variable_pct,
+        "operational_fixed_cost": operational_fixed_cost,
         "grace_days": grace_days,
         "requested_value": requested_value,
         "installment_count": installment_count,
         "installment_amount": installment_amount,
         "installments": installments,
-        "present_value": present_value,
-        "anticipation_cost": requested_value - present_value,
+        "present_value": cost_breakdown["net_disbursement"],
         "first_due_date": installment_dates[0],
+        "anticipation_monthly_rate_pct": anticipation_monthly_rate_pct,
+        **cost_breakdown,
     }
 
 
@@ -1554,10 +1691,16 @@ def save_doctor_request_to_state(offer: dict[str, object], credit_limit: float) 
         "installment_amount": offer["installment_amount"],
         "hospital_payment_day": offer["hospital_payment_day"],
         "monthly_rate_pct": offer["monthly_rate_pct"],
+        "operational_variable_pct": offer["operational_variable_pct"],
+        "operational_fixed_cost": offer["operational_fixed_cost"],
         "grace_days": offer["grace_days"],
         "first_due_date": offer["first_due_date"],
         "present_value": offer["present_value"],
+        "financial_present_value": offer["financial_present_value"],
+        "financial_cost": offer["financial_cost"],
         "anticipation_cost": offer["anticipation_cost"],
+        "anticipation_monthly_rate_pct": offer["anticipation_monthly_rate_pct"],
+        "equivalent_operation_rate": offer["equivalent_operation_rate"],
     }
     st.session_state["doctor_request_pending_sync"] = True
 
@@ -1577,6 +1720,8 @@ def get_fund_defaults() -> dict[str, object]:
             "installment_count": max(1, min(int(request.get("installment_count", 3)), 4)),
             "total_term_days": 93,
             "monthly_rate_pct": float(request.get("monthly_rate_pct", 2.5)),
+            "operational_variable_pct": float(request.get("operational_variable_pct", 0.0)),
+            "operational_fixed_cost": float(request.get("operational_fixed_cost", 0.0)),
             "grace_days": int(request.get("grace_days", 30)),
             "dc_value": min(float(request.get("requested_value", 100000.0)), credit_limit),
             "credit_limit": credit_limit,
@@ -1592,6 +1737,8 @@ def get_fund_defaults() -> dict[str, object]:
         "installment_count": max(1, min(int(installment_count), 4)),
         "total_term_days": int(st.session_state.get("fund_total_term_days", 93)),
         "monthly_rate_pct": float(st.session_state.get("fund_monthly_rate_pct", request.get("monthly_rate_pct", 2.5))),
+        "operational_variable_pct": float(st.session_state.get("fund_operational_variable_pct", request.get("operational_variable_pct", 0.0))),
+        "operational_fixed_cost": float(st.session_state.get("fund_operational_fixed_cost", request.get("operational_fixed_cost", 0.0))),
         "grace_days": int(st.session_state.get("fund_grace_days", request.get("grace_days", 30))),
         "dc_value": min(float(st.session_state.get("fund_dc_value", request.get("requested_value", 100000.0))), credit_limit),
         "credit_limit": credit_limit,
@@ -1606,6 +1753,8 @@ def sync_fund_widget_state(defaults: dict[str, object]) -> None:
     st.session_state["fund_operation_mode"] = "Por parcelas"
     st.session_state["fund_installment_count"] = max(1, min(int(defaults["installment_count"]), 4))
     st.session_state["fund_monthly_rate_pct"] = defaults["monthly_rate_pct"]
+    st.session_state["fund_operational_variable_pct"] = defaults["operational_variable_pct"]
+    st.session_state["fund_operational_fixed_cost"] = defaults["operational_fixed_cost"]
     st.session_state["fund_grace_days"] = defaults["grace_days"]
     st.session_state["fund_dc_value"] = min(float(defaults["dc_value"]), float(defaults["credit_limit"]))
     st.session_state["fund_split_automatically"] = True
@@ -1617,6 +1766,8 @@ def sync_doctor_widget_state_from_fund(defaults: dict[str, object]) -> None:
     st.session_state["doctor_hospital_payment_day"] = defaults["hospital_payment_day"]
     st.session_state["doctor_grace_days"] = defaults["grace_days"]
     st.session_state["doctor_monthly_rate_pct"] = defaults["monthly_rate_pct"]
+    st.session_state["doctor_operational_variable_pct"] = defaults["operational_variable_pct"]
+    st.session_state["doctor_operational_fixed_cost"] = defaults["operational_fixed_cost"]
 
 
 def max_total_term_for_doctor_limit(
@@ -1677,12 +1828,22 @@ def render_doctor_parameters(defaults: dict[str, object]) -> dict[str, object]:
         step=1,
         key="doctor_grace_days",
     )
-    monthly_rate_pct = st.number_input(
-        "Taxa de antecipação (% ao mês)",
-        min_value=0.0,
-        value=float(defaults["monthly_rate_pct"]),
-        step=0.1,
-        key="doctor_monthly_rate_pct",
+    monthly_rate_pct = float(defaults["monthly_rate_pct"])
+    operational_variable_pct = float(defaults["operational_variable_pct"])
+    operational_fixed_cost = float(defaults["operational_fixed_cost"])
+    st.markdown("**Composição configurada pelo Fundo**")
+    st.caption(
+        "A oferta do médico usa a taxa de juros e os custos operacionais definidos na Área do Fundo."
+    )
+    st.markdown(
+        f"""
+        <div class="doctor-cost-config">
+            <div><span>Juros/capital</span><strong>{format_pct(monthly_rate_pct)} a.m.</strong></div>
+            <div><span>Custo variável</span><strong>{format_pct(operational_variable_pct)}</strong></div>
+            <div><span>Custo fixo</span><strong>{format_brl(operational_fixed_cost)}</strong></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
     st.caption("Esses parâmetros alimentam a oferta do médico e, depois, a análise do fundo.")
     return {
@@ -1691,6 +1852,8 @@ def render_doctor_parameters(defaults: dict[str, object]) -> dict[str, object]:
         "hospital_payment_day": int(hospital_payment_day),
         "grace_days": int(grace_days),
         "monthly_rate_pct": float(monthly_rate_pct),
+        "operational_variable_pct": float(operational_variable_pct),
+        "operational_fixed_cost": float(operational_fixed_cost),
     }
 
 
@@ -1714,6 +1877,8 @@ def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[
     hospital_payment_day = int(doctor_params["hospital_payment_day"])
     grace_days = int(doctor_params["grace_days"])
     monthly_rate_pct = float(doctor_params["monthly_rate_pct"])
+    operational_variable_pct = float(doctor_params["operational_variable_pct"])
+    operational_fixed_cost = float(doctor_params["operational_fixed_cost"])
 
     if credit_limit < 1000:
         st.error("O limite de crédito disponível precisa ser de pelo menos R$ 1.000.")
@@ -1777,6 +1942,8 @@ def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[
             request_date=request_date,
             hospital_payment_day=hospital_payment_day,
             monthly_rate_pct=monthly_rate_pct,
+            operational_variable_pct=operational_variable_pct,
+            operational_fixed_cost=operational_fixed_cost,
             grace_days=grace_days,
             requested_value=float(requested_value),
             installment_count=int(installment_count),
@@ -1799,11 +1966,19 @@ def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[
         <div class="doctor-summary">
             <div><span>Você antecipa:</span><strong>{format_brl(float(offer["requested_value"]))}</strong></div>
             <div><span>Custo total:</span><strong>{format_brl(float(offer["anticipation_cost"]))}</strong></div>
-            <div><span>Taxa:</span><strong>{format_pct(float(offer["monthly_rate_pct"]))} ao mês</strong></div>
+            <div><span>Taxa:</span><strong>{format_pct(float(offer["anticipation_monthly_rate_pct"]))} ao mês</strong></div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    with st.expander("Detalhes do custo", expanded=False):
+        st.caption(f"Juros/custo do capital: {format_pct(monthly_rate_pct)} ao mês")
+        st.caption(f"Taxa mensal da antecipação: {format_pct(float(offer['anticipation_monthly_rate_pct']))} ao mês")
+        st.caption(f"Desconto financeiro: {format_brl_markdown(float(offer['financial_cost']))}")
+        st.caption(f"Custo operacional variável: {format_pct(operational_variable_pct)} da transação")
+        st.caption(f"Custo operacional fixo: {format_brl(operational_fixed_cost)}")
+        st.caption(f"Taxa de antecipação total: {format_pct(float(offer['equivalent_operation_rate']) * 100)} da operação")
+        st.caption(f"VP financeiro antes dos custos: {format_brl(float(offer['financial_present_value']))}")
     st.markdown("**Desconto automático nos seus repasses:**")
     render_doctor_installment_list(offer["installments"])
     st.caption("Sem boleto. Sem cobrança manual.")
@@ -1816,13 +1991,14 @@ def render_doctor_fund_mapping() -> None:
         ("Data da antecipação", "Preenche a Data da antecipação e ancora o cálculo de VP, carência e vencimentos."),
         ("Dia de pagamento do hospital", "Define o calendário mensal usado para vencimentos, cobrança, radar e início do desconto."),
         ("Carência", "Define quando a primeira parcela pode vencer e quando o QMM deixa de ficar flat."),
-        ("Taxa de antecipação", "Define o desconto financeiro usado para calcular o VP creditado e o custo da antecipação."),
+        ("Taxa de juros / custo do capital", "Define o desconto financeiro usado para calcular o VP financeiro das parcelas."),
+        ("Custos operacionais", "Reduzem o valor líquido recebido hoje e entram na taxa de antecipação da operação."),
         ("Limite de crédito", "Define o valor máximo que o médico pode solicitar; não altera o DC até a escolha do valor."),
         ("Valor que deseja antecipar", "Preenche o Direito Creditório (DC) e recalcula VP, custo, QMM, cobrança e painéis."),
         ("Quantidade de parcelas", "Preenche o modo Por parcelas e a quantidade de parcelas da operação."),
         ("Quando começa o desconto", "É o primeiro pagamento hospitalar após a carência e vira o primeiro vencimento do cronograma."),
-        ("Valor recebido hoje", "Corresponde ao VP creditado ao médico calculado pela curva de parcelas e pela taxa da operação."),
-        ("Custo total", "Corresponde à diferença entre DC/parcelas e VP creditado ao médico."),
+        ("Valor recebido hoje", "Corresponde ao VP financeiro menos os custos operacionais da transação."),
+        ("Custo total", "Corresponde à diferença entre DC/parcelas e valor líquido creditado ao médico."),
         ("Descontos nos repasses", "Gera as datas e valores da curva de cobrança esperada do médico."),
     ]
     st.markdown('<div class="doctor-impact-panel">', unsafe_allow_html=True)
@@ -1937,12 +2113,27 @@ def main() -> None:
                 f"Limite atual: {max_total_term_input} dias para manter até 4 parcelas."
             )
 
+        st.subheader("Composição da taxa / custo")
         monthly_rate_pct = st.number_input(
-            "Taxa de custo da antecipação (% ao mês)",
+            "Taxa de juros / custo do capital (% ao mês)",
             min_value=0.0,
             value=float(defaults["monthly_rate_pct"]),
             step=0.1,
             key="fund_monthly_rate_pct",
+        )
+        operational_variable_pct = st.number_input(
+            "Custo operacional variável (% da transação)",
+            min_value=0.0,
+            value=float(defaults["operational_variable_pct"]),
+            step=0.1,
+            key="fund_operational_variable_pct",
+        )
+        operational_fixed_cost = st.number_input(
+            "Custo operacional fixo por transação",
+            min_value=0.0,
+            value=float(defaults["operational_fixed_cost"]),
+            step=50.0,
+            key="fund_operational_fixed_cost",
         )
         grace_days = st.number_input(
             "Carência (dias corridos)",
@@ -1985,6 +2176,8 @@ def main() -> None:
             hospital_payment_day=int(hospital_payment_day),
             operation_mode=operation_mode,
             monthly_rate_pct=float(monthly_rate_pct),
+            operational_variable_pct=float(operational_variable_pct),
+            operational_fixed_cost=float(operational_fixed_cost),
             total_term_days=int(total_term_days_input) if total_term_days_input is not None else None,
             grace_days=int(grace_days),
             dc_value=float(dc_value),
@@ -1997,6 +2190,11 @@ def main() -> None:
         st.stop()
 
     present_value = float(projection["present_value"])
+    financial_present_value = float(projection["financial_present_value"])
+    financial_cost = float(projection["financial_cost"])
+    operational_total_cost = float(projection["operational_total_cost"])
+    equivalent_operation_rate = float(projection["equivalent_operation_rate"])
+    anticipation_monthly_rate_pct = float(projection["anticipation_monthly_rate_pct"])
     installments = projection["installments"]
     radars = projection["radars"]
     grace_end = projection["grace_end"]
@@ -2010,7 +2208,7 @@ def main() -> None:
         st.stop()
     installment_amount = float(projection["installment_amount"])
     real_total_term_days = int(projection["real_total_term_days"])
-    anticipation_cost = sum(item.amount for item in installments) - present_value
+    anticipation_cost = float(projection["anticipation_cost"])
 
     with st.sidebar:
         st.divider()
@@ -2021,6 +2219,8 @@ def main() -> None:
             st.metric("Quantidade de parcelas calculada", installment_count)
         st.caption(f"Valor por parcela: {format_brl(installment_amount)}")
         st.caption(f"Última parcela: {format_date_pt(projection['final_date'])}")
+        st.caption(f"Taxa mensal da antecipação: {format_pct(anticipation_monthly_rate_pct)} ao mês")
+        st.caption(f"Taxa de antecipação total: {format_pct(equivalent_operation_rate * 100)} da operação")
 
     tab_main, tab_delay = st.tabs(["Operação prevista", "Simulação de atraso"])
 
