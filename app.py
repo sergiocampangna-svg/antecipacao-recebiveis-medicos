@@ -1545,6 +1545,7 @@ def calculate_doctor_offer(
 
 
 def save_doctor_request_to_state(offer: dict[str, object], credit_limit: float) -> None:
+    st.session_state["doctor_credit_limit_value"] = float(credit_limit)
     st.session_state["doctor_request"] = {
         "request_date": offer["request_date"],
         "credit_limit": credit_limit,
@@ -1563,7 +1564,12 @@ def save_doctor_request_to_state(offer: dict[str, object], credit_limit: float) 
 
 def get_fund_defaults() -> dict[str, object]:
     request = st.session_state.get("doctor_request", {})
-    credit_limit = float(st.session_state.get("doctor_credit_limit", request.get("credit_limit", 20000.0)))
+    credit_limit = float(
+        st.session_state.get(
+            "doctor_credit_limit_value",
+            request.get("credit_limit", st.session_state.get("doctor_credit_limit", 20000.0)),
+        )
+    )
     if request and st.session_state.get("doctor_request_pending_sync"):
         return {
             "advance_date": request.get("request_date", date(2026, 4, 18)),
@@ -1645,10 +1651,11 @@ def render_doctor_parameters(defaults: dict[str, object]) -> dict[str, object]:
     credit_limit = st.number_input(
         "Limite de crédito",
         min_value=0.0,
-        value=float(st.session_state.get("doctor_credit_limit", 20000.0)),
+        value=float(st.session_state.get("doctor_credit_limit_value", 20000.0)),
         step=1000.0,
         key="doctor_credit_limit",
     )
+    st.session_state["doctor_credit_limit_value"] = float(credit_limit)
     request_date = st.date_input(
         "Data da antecipação",
         value=defaults["advance_date"],
