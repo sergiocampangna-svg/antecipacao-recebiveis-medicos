@@ -1289,10 +1289,552 @@ def inject_styles() -> None:
         div[data-testid="stSidebar"] {
             background: #f7f9fc;
         }
+        .doctor-shell {
+            display: block;
+            max-width: 1080px;
+            margin: 0 auto;
+            align-items: start;
+            padding: 0 0 28px;
+            margin-top: -0.55rem;
+        }
+        .doctor-page-title {
+            margin-bottom: 0.35rem;
+        }
+        .doctor-page-title h1 {
+            margin-bottom: 0.2rem;
+        }
+        .doctor-page-title p {
+            margin-top: 0;
+            margin-bottom: 0.65rem;
+            color: #64748b;
+            font-size: 0.98rem;
+        }
+        .doctor-card {
+            border: 0;
+            border-radius: 0;
+            padding: 0;
+            background: transparent;
+            box-shadow: none;
+        }
+        .doctor-limit {
+            background: #f4f8fd;
+            border: 1px solid #edf3fb;
+            border-radius: 8px;
+            padding: 11px 14px;
+            color: #4b5563;
+            font-size: 0.9rem;
+            margin: 0 0 16px;
+        }
+        .doctor-question-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            margin: 6px 0 4px;
+            flex-wrap: wrap;
+        }
+        .doctor-question-row strong {
+            color: #172033;
+            font-size: 0.92rem;
+            line-height: 1.18;
+            flex: 1 1 170px;
+        }
+        .doctor-question-row span {
+            color: #172033;
+            font-size: 1.06rem;
+            font-weight: 800;
+            line-height: 1.15;
+            white-space: nowrap;
+            margin-left: auto;
+        }
+        .doctor-slider-caption {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: #8a95a7;
+            font-size: 0.82rem;
+            margin: -6px 0 14px;
+        }
+        .doctor-slider-caption strong {
+            color: #172033;
+            font-size: 0.94rem;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+        .doctor-section {
+            border-top: 1px solid #edf2f7;
+            padding-top: 14px;
+            margin-top: 14px;
+        }
+        .doctor-date-pill {
+            display: inline-flex;
+            border: 1px solid #dce5ef;
+            border-radius: 7px;
+            padding: 8px 12px;
+            margin: 4px 0 0;
+            color: #1f7ae0;
+            font-weight: 700;
+            background: #ffffff;
+        }
+        .doctor-result {
+            border-top: 1px solid #e8edf3;
+            padding-top: 16px;
+            margin-top: 16px;
+        }
+        .doctor-result span {
+            color: #172033;
+            font-weight: 700;
+        }
+        .doctor-result strong {
+            display: block;
+            color: #1680e5;
+            font-size: 1.72rem;
+            line-height: 1.1;
+            margin-top: 6px;
+        }
+        .doctor-summary {
+            margin: 10px 0 14px;
+            color: #5d6b82;
+            font-size: 0.91rem;
+        }
+        .doctor-summary div {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 3px 0;
+        }
+        .doctor-summary strong {
+            color: #172033;
+        }
+        .doctor-installment-row {
+            display: flex;
+            gap: 9px;
+            color: #5d6b82;
+            font-size: 0.94rem;
+            padding: 2px 0;
+        }
+        .doctor-installment-row span::before {
+            content: "•";
+            margin-right: 8px;
+            color: #64748b;
+        }
+        .doctor-installment-row strong {
+            color: #172033;
+        }
+        .doctor-impact-panel {
+            border: 0;
+            border-radius: 0;
+            padding: 0;
+            background: transparent;
+            box-shadow: none;
+        }
+        .doctor-impact-panel h3 {
+            margin-top: 0;
+            margin-bottom: 4px;
+            font-size: 0.88rem;
+            line-height: 1.2;
+        }
+        .doctor-impact-panel p {
+            color: #64748b;
+            margin-top: 0;
+            margin-bottom: 5px;
+            font-size: 0.76rem;
+            line-height: 1.28;
+        }
+        .doctor-impact-item {
+            border-top: 1px solid #edf2f7;
+            padding: 5px 0;
+        }
+        .doctor-impact-item:first-of-type {
+            border-top: 0;
+        }
+        .doctor-impact-item strong {
+            display: block;
+            color: #172033;
+            font-size: 0.76rem;
+            margin-bottom: 2px;
+            line-height: 1.2;
+        }
+        .doctor-impact-item span {
+            display: block;
+            color: #5d6b82;
+            font-size: 0.72rem;
+            line-height: 1.26;
+        }
+        @media (max-width: 980px) {
+            .doctor-shell {
+                max-width: 100%;
+            }
+        }
+        div[data-testid="stSlider"] {
+            padding-top: 0;
+        }
+        div[data-testid="stSlider"] [data-baseweb="slider"] > div {
+            color: #1f7ae0;
+        }
+        div[data-testid="stSlider"] [data-testid="stTickBar"],
+        div[data-testid="stSlider"] [data-testid="stTickBarMin"],
+        div[data-testid="stSlider"] [data-testid="stTickBarMax"],
+        div[data-testid="stSlider"] [data-testid="stThumbValue"],
+        div[data-testid="stSlider"] [data-testid="stSliderTickBarMin"],
+        div[data-testid="stSlider"] [data-testid="stSliderTickBarMax"],
+        div[data-testid="stSlider"] [data-testid="stSliderThumbValue"],
+        div[data-testid="stSlider"] output,
+        div[data-testid="stSlider"] [role="tooltip"] {
+            display: none !important;
+        }
+        div[data-testid="stSlider"] [data-baseweb="slider"] div[style*="position: absolute"][style*="top"] {
+            font-size: 0 !important;
+            color: transparent !important;
+        }
+        div[data-testid="stButton"] button[kind="primary"],
+        div[data-testid="stBaseButton-primary"] {
+            background: #1680e5 !important;
+            border-color: #1680e5 !important;
+            color: #ffffff !important;
+            border-radius: 7px !important;
+            min-height: 46px;
+            font-weight: 800;
+            box-shadow: 0 8px 18px rgba(22, 128, 229, 0.22);
+        }
+        div[data-testid="stButton"] button[kind="primary"]:hover,
+        div[data-testid="stBaseButton-primary"]:hover {
+            background: #0f6fca !important;
+            border-color: #0f6fca !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def calculate_doctor_offer(
+    request_date: date,
+    hospital_payment_day: int,
+    monthly_rate_pct: float,
+    grace_days: int,
+    requested_value: float,
+    installment_count: int,
+) -> dict[str, object]:
+    installment_dates = calculate_installment_dates_by_count(
+        advance_date=request_date,
+        hospital_payment_day=hospital_payment_day,
+        grace_days=grace_days,
+        installment_count=installment_count,
+    )
+    installment_amount = requested_value / installment_count
+    present_value, installments = calculate_present_value(
+        request_date,
+        installment_dates,
+        installment_amount,
+        monthly_rate_pct / 100,
+    )
+    return {
+        "request_date": request_date,
+        "hospital_payment_day": hospital_payment_day,
+        "monthly_rate_pct": monthly_rate_pct,
+        "grace_days": grace_days,
+        "requested_value": requested_value,
+        "installment_count": installment_count,
+        "installment_amount": installment_amount,
+        "installments": installments,
+        "present_value": present_value,
+        "anticipation_cost": requested_value - present_value,
+        "first_due_date": installment_dates[0],
+    }
+
+
+def save_doctor_request_to_state(offer: dict[str, object], credit_limit: float) -> None:
+    st.session_state["doctor_request"] = {
+        "request_date": offer["request_date"],
+        "credit_limit": credit_limit,
+        "requested_value": offer["requested_value"],
+        "installment_count": offer["installment_count"],
+        "installment_amount": offer["installment_amount"],
+        "hospital_payment_day": offer["hospital_payment_day"],
+        "monthly_rate_pct": offer["monthly_rate_pct"],
+        "grace_days": offer["grace_days"],
+        "first_due_date": offer["first_due_date"],
+        "present_value": offer["present_value"],
+        "anticipation_cost": offer["anticipation_cost"],
+    }
+    st.session_state["doctor_request_pending_sync"] = True
+
+
+def get_fund_defaults() -> dict[str, object]:
+    request = st.session_state.get("doctor_request", {})
+    credit_limit = float(st.session_state.get("doctor_credit_limit", request.get("credit_limit", 20000.0)))
+    if request and st.session_state.get("doctor_request_pending_sync"):
+        return {
+            "advance_date": request.get("request_date", date(2026, 4, 18)),
+            "hospital_payment_day": int(request.get("hospital_payment_day", 20)),
+            "installment_count": max(1, min(int(request.get("installment_count", 3)), 4)),
+            "total_term_days": 93,
+            "monthly_rate_pct": float(request.get("monthly_rate_pct", 2.5)),
+            "grace_days": int(request.get("grace_days", 30)),
+            "dc_value": min(float(request.get("requested_value", 100000.0)), credit_limit),
+            "credit_limit": credit_limit,
+        }
+    operation_mode = st.session_state.get("fund_operation_mode", "Por parcelas")
+    if operation_mode == "Por prazo total":
+        installment_count = st.session_state.get("fund_calculated_installment_count", request.get("installment_count", 3))
+    else:
+        installment_count = st.session_state.get("fund_installment_count", request.get("installment_count", 3))
+    return {
+        "advance_date": st.session_state.get("fund_advance_date", request.get("request_date", date(2026, 4, 18))),
+        "hospital_payment_day": int(st.session_state.get("fund_hospital_payment_day", request.get("hospital_payment_day", 20))),
+        "installment_count": max(1, min(int(installment_count), 4)),
+        "total_term_days": int(st.session_state.get("fund_total_term_days", 93)),
+        "monthly_rate_pct": float(st.session_state.get("fund_monthly_rate_pct", request.get("monthly_rate_pct", 2.5))),
+        "grace_days": int(st.session_state.get("fund_grace_days", request.get("grace_days", 30))),
+        "dc_value": min(float(st.session_state.get("fund_dc_value", request.get("requested_value", 100000.0))), credit_limit),
+        "credit_limit": credit_limit,
+    }
+
+
+def sync_fund_widget_state(defaults: dict[str, object]) -> None:
+    if not st.session_state.get("doctor_request_pending_sync"):
+        return
+    st.session_state["fund_advance_date"] = defaults["advance_date"]
+    st.session_state["fund_hospital_payment_day"] = defaults["hospital_payment_day"]
+    st.session_state["fund_operation_mode"] = "Por parcelas"
+    st.session_state["fund_installment_count"] = max(1, min(int(defaults["installment_count"]), 4))
+    st.session_state["fund_monthly_rate_pct"] = defaults["monthly_rate_pct"]
+    st.session_state["fund_grace_days"] = defaults["grace_days"]
+    st.session_state["fund_dc_value"] = min(float(defaults["dc_value"]), float(defaults["credit_limit"]))
+    st.session_state["fund_split_automatically"] = True
+    st.session_state["doctor_request_pending_sync"] = False
+
+
+def sync_doctor_widget_state_from_fund(defaults: dict[str, object]) -> None:
+    st.session_state["doctor_request_date"] = defaults["advance_date"]
+    st.session_state["doctor_hospital_payment_day"] = defaults["hospital_payment_day"]
+    st.session_state["doctor_grace_days"] = defaults["grace_days"]
+    st.session_state["doctor_monthly_rate_pct"] = defaults["monthly_rate_pct"]
+
+
+def max_total_term_for_doctor_limit(
+    advance_date: date,
+    hospital_payment_day: int,
+    grace_days: int,
+) -> int:
+    installment_dates = calculate_installment_dates_by_count(
+        advance_date=advance_date,
+        hospital_payment_day=hospital_payment_day,
+        grace_days=grace_days,
+        installment_count=4,
+    )
+    return calculate_real_total_term(advance_date, installment_dates)
+
+
+def render_doctor_installment_list(installments: list[Installment]) -> None:
+    for item in installments:
+        st.markdown(
+            f"""
+            <div class="doctor-installment-row">
+                <span>{item.due_date.strftime("%d/%m")}</span>
+                <strong>{format_brl(item.amount)}</strong>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def render_doctor_parameters(defaults: dict[str, object]) -> dict[str, object]:
+    st.header("Parâmetros do médico")
+    credit_limit = st.number_input(
+        "Limite de crédito",
+        min_value=0.0,
+        value=float(st.session_state.get("doctor_credit_limit", 20000.0)),
+        step=1000.0,
+        key="doctor_credit_limit",
+    )
+    request_date = st.date_input(
+        "Data da antecipação",
+        value=defaults["advance_date"],
+        format="DD/MM/YYYY",
+        key="doctor_request_date",
+    )
+    hospital_payment_day = st.number_input(
+        "Dia do mês de pagamento do hospital",
+        min_value=1,
+        max_value=31,
+        value=int(defaults["hospital_payment_day"]),
+        key="doctor_hospital_payment_day",
+    )
+    grace_days = st.number_input(
+        "Carência (dias corridos)",
+        min_value=0,
+        max_value=3650,
+        value=int(defaults["grace_days"]),
+        step=1,
+        key="doctor_grace_days",
+    )
+    monthly_rate_pct = st.number_input(
+        "Taxa de antecipação (% ao mês)",
+        min_value=0.0,
+        value=float(defaults["monthly_rate_pct"]),
+        step=0.1,
+        key="doctor_monthly_rate_pct",
+    )
+    st.caption("Esses parâmetros alimentam a oferta do médico e, depois, a análise do fundo.")
+    return {
+        "credit_limit": float(credit_limit),
+        "request_date": request_date,
+        "hospital_payment_day": int(hospital_payment_day),
+        "grace_days": int(grace_days),
+        "monthly_rate_pct": float(monthly_rate_pct),
+    }
+
+
+def render_doctor_app(defaults: dict[str, object], doctor_params: dict[str, object]) -> None:
+    st.markdown('<div class="doctor-shell">', unsafe_allow_html=True)
+    left_col, right_col = st.columns([0.72, 1.0], gap="medium")
+    with left_col:
+        st.markdown('<div class="doctor-card">', unsafe_allow_html=True)
+        render_doctor_request_card(defaults, doctor_params)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with right_col:
+        render_doctor_fund_mapping()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[str, object]) -> None:
+    credit_limit = float(doctor_params["credit_limit"])
+    request_date = doctor_params["request_date"]
+    hospital_payment_day = int(doctor_params["hospital_payment_day"])
+    grace_days = int(doctor_params["grace_days"])
+    monthly_rate_pct = float(doctor_params["monthly_rate_pct"])
+
+    if credit_limit < 1000:
+        st.error("O limite de crédito disponível precisa ser de pelo menos R$ 1.000.")
+        return
+
+    requested_default = min(max(float(defaults["dc_value"]), 1000.0), float(credit_limit))
+    st.markdown(f'<div class="doctor-limit">Limite disponível: <strong>{format_brl(float(credit_limit))}</strong></div>', unsafe_allow_html=True)
+    value_header = st.empty()
+    requested_value = st.slider(
+        "Valor a antecipar",
+        min_value=1000.0,
+        max_value=float(credit_limit),
+        value=requested_default,
+        step=500.0,
+        label_visibility="collapsed",
+    )
+    value_header.markdown(
+        f"""
+        <div class="doctor-question-row">
+            <strong>Quanto você quer antecipar?</strong>
+            <span>{format_brl(float(requested_value))}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="doctor-slider-caption">
+            <span>mín {format_brl(1000.0)}</span>
+            <span>máx {format_brl(float(credit_limit))}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="doctor-section">', unsafe_allow_html=True)
+    st.markdown("**Em quantas parcelas você quer pagar?**")
+    installment_options = [1, 2, 3, 4]
+    installment_index = max(min(int(defaults["installment_count"]), 4), 1) - 1
+    if hasattr(st, "segmented_control"):
+        installment_count = st.segmented_control(
+            "Parcelas",
+            options=installment_options,
+            default=installment_options[installment_index],
+            format_func=lambda value: f"{value}x",
+            label_visibility="collapsed",
+        )
+    else:
+        installment_count = st.radio(
+            "Parcelas",
+            options=installment_options,
+            index=installment_index,
+            horizontal=True,
+            format_func=lambda value: f"{value}x",
+            label_visibility="collapsed",
+        )
+    installment_count = int(installment_count or installment_options[installment_index])
+
+    try:
+        offer = calculate_doctor_offer(
+            request_date=request_date,
+            hospital_payment_day=hospital_payment_day,
+            monthly_rate_pct=monthly_rate_pct,
+            grace_days=grace_days,
+            requested_value=float(requested_value),
+            installment_count=int(installment_count),
+        )
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    save_doctor_request_to_state(offer, float(credit_limit))
+
+    st.markdown("**Quando começa o desconto?**")
+    st.markdown(f'<div class="doctor-date-pill"><span>{format_date_pt(offer["first_due_date"])}</span></div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="doctor-result">
+            <span>Você recebe hoje</span>
+            <strong>{format_brl(float(offer["present_value"]))}</strong>
+        </div>
+        <div class="doctor-summary">
+            <div><span>Você antecipa:</span><strong>{format_brl(float(offer["requested_value"]))}</strong></div>
+            <div><span>Custo total:</span><strong>{format_brl(float(offer["anticipation_cost"]))}</strong></div>
+            <div><span>Taxa:</span><strong>{format_pct(float(offer["monthly_rate_pct"]))} ao mês</strong></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("**Desconto automático nos seus repasses:**")
+    render_doctor_installment_list(offer["installments"])
+    st.caption("Sem boleto. Sem cobrança manual.")
+    st.button(f"Receber {format_brl(float(offer['present_value']))} agora", type="primary", use_container_width=True)
+    st.caption("A solicitação acima já alimenta a Área do Fundo como cenário-base.")
+
+
+def render_doctor_fund_mapping() -> None:
+    mapping_rows = [
+        ("Data da antecipação", "Preenche a Data da antecipação e ancora o cálculo de VP, carência e vencimentos."),
+        ("Dia de pagamento do hospital", "Define o calendário mensal usado para vencimentos, cobrança, radar e início do desconto."),
+        ("Carência", "Define quando a primeira parcela pode vencer e quando o QMM deixa de ficar flat."),
+        ("Taxa de antecipação", "Define o desconto financeiro usado para calcular o VP creditado e o custo da antecipação."),
+        ("Limite de crédito", "Define o valor máximo que o médico pode solicitar; não altera o DC até a escolha do valor."),
+        ("Valor que deseja antecipar", "Preenche o Direito Creditório (DC) e recalcula VP, custo, QMM, cobrança e painéis."),
+        ("Quantidade de parcelas", "Preenche o modo Por parcelas e a quantidade de parcelas da operação."),
+        ("Quando começa o desconto", "É o primeiro pagamento hospitalar após a carência e vira o primeiro vencimento do cronograma."),
+        ("Valor recebido hoje", "Corresponde ao VP creditado ao médico calculado pela curva de parcelas e pela taxa da operação."),
+        ("Custo total", "Corresponde à diferença entre DC/parcelas e VP creditado ao médico."),
+        ("Descontos nos repasses", "Gera as datas e valores da curva de cobrança esperada do médico."),
+    ]
+    st.markdown('<div class="doctor-impact-panel">', unsafe_allow_html=True)
+    st.markdown("<h3>Como a solicitação alimenta a Área do Fundo</h3>", unsafe_allow_html=True)
+    st.markdown(
+        "<p>Cada escolha feita na solicitação de antecipação alimenta automaticamente a análise operacional e financeira do fundo.</p>",
+        unsafe_allow_html=True,
+    )
+    for label, impact in mapping_rows:
+        st.markdown(
+            f"""
+            <div class="doctor-impact-item">
+                <strong>{label}</strong>
+                <span>{impact}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def main() -> None:
@@ -1303,44 +1845,130 @@ def main() -> None:
     )
     inject_styles()
 
+    defaults = get_fund_defaults()
+    with st.sidebar:
+        selected_area = st.radio("Menu", ["Aplicação do Médico", "Aplicação do Fundo"], key="selected_area")
+
+    if selected_area == "Aplicação do Médico":
+        if st.session_state.get("_previous_area") == "Aplicação do Fundo":
+            defaults = get_fund_defaults()
+            sync_doctor_widget_state_from_fund(defaults)
+        with st.sidebar:
+            doctor_params = render_doctor_parameters(defaults)
+        st.markdown(
+            """
+            <div class="doctor-page-title">
+                <h1>Solicite sua antecipação</h1>
+                <p>Escolha o valor, veja quanto recebe hoje e cronograma de descontos nos seus repasses.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        render_doctor_app(defaults, doctor_params)
+        st.session_state["_previous_area"] = selected_area
+        return
+
+    sync_fund_widget_state(defaults)
     st.title("Simulação de Antecipação de Recebíveis Médicos")
     st.caption("Curvas executivas de QMM, cobrança e Direito Creditório com radar mensal calculado em dias úteis.")
 
     with st.sidebar:
         st.header("Parâmetros da operação")
-        advance_date = st.date_input("Data da antecipação", value=date(2026, 4, 18), format="DD/MM/YYYY")
-        hospital_payment_day = st.number_input("Dia do mês de pagamento do hospital", min_value=1, max_value=31, value=20)
+        if st.session_state.get("doctor_request"):
+            st.info("Parâmetros carregados da solicitação do médico. Você pode ajustar a análise abaixo.")
+        advance_date = st.date_input(
+            "Data da antecipação",
+            value=defaults["advance_date"],
+            format="DD/MM/YYYY",
+            key="fund_advance_date",
+        )
+        hospital_payment_day = st.number_input(
+            "Dia do mês de pagamento do hospital",
+            min_value=1,
+            max_value=31,
+            value=int(defaults["hospital_payment_day"]),
+            key="fund_hospital_payment_day",
+        )
         operation_mode = st.radio(
             "Modo de definição da operação",
             options=["Por parcelas", "Por prazo total"],
             horizontal=False,
+            key="fund_operation_mode",
         )
         if operation_mode == "Por parcelas":
+            if int(st.session_state.get("fund_installment_count", defaults["installment_count"])) > 4:
+                st.session_state["fund_installment_count"] = 4
             installment_count_input = st.number_input(
                 "Quantidade de parcelas de liquidação do médico",
                 min_value=1,
-                max_value=60,
-                value=3,
+                max_value=4,
+                value=int(defaults["installment_count"]),
                 step=1,
+                key="fund_installment_count",
             )
             total_term_days_input = None
             st.caption("O prazo total será calculado pelo último vencimento hospitalar usado.")
         else:
+            max_total_term_input = max_total_term_for_doctor_limit(
+                advance_date=advance_date,
+                hospital_payment_day=int(hospital_payment_day),
+                grace_days=int(defaults["grace_days"]),
+            )
+            if int(st.session_state.get("fund_total_term_days", defaults["total_term_days"])) > max_total_term_input:
+                st.session_state["fund_total_term_days"] = max_total_term_input
             total_term_days_input = st.number_input(
                 "Prazo total da operação (dias corridos)",
                 min_value=1,
-                value=93,
+                max_value=max_total_term_input,
+                value=min(int(defaults["total_term_days"]), max_total_term_input),
                 step=1,
+                key="fund_total_term_days",
             )
             installment_count_input = None
-            st.caption("A quantidade de parcelas será calculada pelos vencimentos dentro do prazo.")
+            st.caption(
+                "A quantidade de parcelas será calculada pelos vencimentos dentro do prazo. "
+                f"Limite atual: {max_total_term_input} dias para manter até 4 parcelas."
+            )
 
-        monthly_rate_pct = st.number_input("Taxa de custo da antecipação (% ao mês)", min_value=0.0, value=2.5, step=0.1)
-        grace_days = st.number_input("Carência (dias corridos)", min_value=0, max_value=3650, value=30, step=1)
-        dc_value = st.number_input("Valor do Direito Creditório (DC)", min_value=0.01, value=100000.0, step=1000.0)
-        split_automatically = st.toggle("Dividir DC automaticamente entre as parcelas", value=True)
+        monthly_rate_pct = st.number_input(
+            "Taxa de custo da antecipação (% ao mês)",
+            min_value=0.0,
+            value=float(defaults["monthly_rate_pct"]),
+            step=0.1,
+            key="fund_monthly_rate_pct",
+        )
+        grace_days = st.number_input(
+            "Carência (dias corridos)",
+            min_value=0,
+            max_value=3650,
+            value=int(defaults["grace_days"]),
+            step=1,
+            key="fund_grace_days",
+        )
+        if float(st.session_state.get("fund_dc_value", defaults["dc_value"])) > float(defaults["credit_limit"]):
+            st.session_state["fund_dc_value"] = float(defaults["credit_limit"])
+        dc_value = st.number_input(
+            "Valor do Direito Creditório (DC)",
+            min_value=0.01,
+            max_value=float(defaults["credit_limit"]),
+            value=float(defaults["dc_value"]),
+            step=1000.0,
+            key="fund_dc_value",
+        )
+        st.caption(f"Limite de crédito do médico: {format_brl(float(defaults['credit_limit']))}")
+        split_automatically = st.toggle(
+            "Dividir DC automaticamente entre as parcelas",
+            value=True,
+            key="fund_split_automatically",
+        )
         if not split_automatically:
-            installment_amount = st.number_input("Valor de cada parcela", min_value=0.01, value=50000.0, step=1000.0)
+            installment_amount = st.number_input(
+                "Valor de cada parcela",
+                min_value=0.01,
+                value=50000.0,
+                step=1000.0,
+                key="fund_installment_amount",
+            )
         else:
             installment_amount = None
 
@@ -1366,6 +1994,13 @@ def main() -> None:
     radars = projection["radars"]
     grace_end = projection["grace_end"]
     installment_count = int(projection["calculated_installment_count"])
+    st.session_state["fund_calculated_installment_count"] = installment_count
+    if installment_count > 4:
+        st.error(
+            "A operação calculada possui mais de 4 parcelas. "
+            "A Área do Médico permite no máximo 4 parcelas; reduza o prazo total."
+        )
+        st.stop()
     installment_amount = float(projection["installment_amount"])
     real_total_term_days = int(projection["real_total_term_days"])
     anticipation_cost = sum(item.amount for item in installments) - present_value
@@ -1634,6 +2269,8 @@ def main() -> None:
         with st.expander("Comentários / marcos do cenário", expanded=False):
             risk_timeline = build_timeline_comments(advance_date, grace_end, installments, radars, liquidation)
             st.dataframe(risk_timeline, use_container_width=True, hide_index=True)
+
+    st.session_state["_previous_area"] = selected_area
 
 if __name__ == "__main__":
     main()
