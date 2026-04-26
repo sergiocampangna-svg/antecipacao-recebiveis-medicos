@@ -1267,8 +1267,10 @@ def build_timeline_comments(
     grace_end: date,
     installments: list[Installment],
     radars: list[RadarWindow],
+    projection: dict[str, object] | None = None,
     liquidation: dict[str, object] | None = None,
 ) -> pd.DataFrame:
+    qmm_breakdown = build_qmm_collection_breakdown(installments, projection)
     rows = [
         {
             "Data": format_date_pt(advance_date),
@@ -1290,7 +1292,21 @@ def build_timeline_comments(
             }
         )
     for item in installments:
-        payment_comment = f"Cobrança acumulada sobe em {format_brl(item.amount)}."
+        breakdown = qmm_breakdown.get(item.number)
+        if breakdown:
+            principal_amount = breakdown["principal"]
+            interest_and_cost = breakdown["interest_and_cost"]
+            qmm_reference = breakdown["qmm_due"]
+        else:
+            principal_amount = item.present_value
+            interest_and_cost = item.amount - principal_amount
+            qmm_reference = item.amount
+        payment_comment = (
+            f"Cobrança acumulada sobe em {format_brl(item.amount)}: "
+            f"principal {format_brl(principal_amount)}; "
+            f"juros + custo operacional {format_brl(interest_and_cost)} "
+            f"(QMM de referência {format_brl(qmm_reference)})."
+        )
         if liquidation:
             table = liquidation["result_table"]
             row = table.loc[table["Parcela"] == item.number]
@@ -1300,6 +1316,9 @@ def build_timeline_comments(
                 overdue = float(row.iloc[0]["Saldo em atraso"])
                 mora = float(row.iloc[0]["Mora"])
                 payment_comment = (
+                    f"Previsto: principal {format_brl(principal_amount)}; "
+                    f"juros + custo operacional {format_brl(interest_and_cost)} "
+                    f"(QMM de referência {format_brl(qmm_reference)}). "
                     f"{status}: pago {format_brl(paid)}; "
                     f"atraso acumulado {format_brl(overdue)}; mora {format_brl(mora)}."
                 )
@@ -1311,6 +1330,57 @@ def build_timeline_comments(
             }
         )
     return pd.DataFrame(rows)
+
+
+def render_timeline_comments(timeline: pd.DataFrame) -> None:
+    for _, row in timeline.iterrows():
+        st.markdown(
+            f"""
+            <div class="timeline-item">
+                <div class="timeline-date">{row["Data"]}</div>
+                <div class="timeline-content">
+                    <strong>{row["Marco"]}</strong>
+                    <span>{row["Comentário"]}</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def qmm_value_on_date(projection: dict[str, object], target_date: date) -> float:
+    df = projection["df"]
+    row = df.loc[df["date"] == target_date]
+    if not row.empty:
+        return float(row.iloc[0]["qmm"])
+    previous = df.loc[df["date"] <= target_date]
+    if not previous.empty:
+        return float(previous.iloc[-1]["qmm"])
+    return float(projection["present_value"])
+
+
+def build_qmm_collection_breakdown(
+    installments: list[Installment],
+    projection: dict[str, object] | None,
+) -> dict[int, dict[str, float]]:
+    if not projection:
+        return {}
+
+    previous_qmm = float(projection["present_value"])
+    breakdown: dict[int, dict[str, float]] = {}
+    for item in installments:
+        qmm_at_due = qmm_value_on_date(projection, item.due_date)
+        qmm_increment = max(qmm_at_due - previous_qmm, 0)
+        interest_and_cost = min(qmm_increment, item.amount)
+        principal_amount = max(item.amount - interest_and_cost, 0)
+        breakdown[item.number] = {
+            "qmm_start": previous_qmm,
+            "qmm_due": qmm_at_due,
+            "principal": principal_amount,
+            "interest_and_cost": interest_and_cost,
+        }
+        previous_qmm = qmm_at_due
+    return breakdown
 
 
 def inject_styles() -> None:
@@ -1579,9 +1649,43 @@ def inject_styles() -> None:
             font-size: 0.72rem;
             line-height: 1.26;
         }
+        .timeline-item {
+            display: grid;
+            grid-template-columns: minmax(118px, 170px) 1fr;
+            gap: 14px;
+            border: 1px solid #e8edf3;
+            border-radius: 8px;
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            background: #ffffff;
+        }
+        .timeline-date {
+            color: #64748b;
+            font-weight: 700;
+            font-size: 0.84rem;
+            line-height: 1.25;
+        }
+        .timeline-content strong {
+            display: block;
+            color: #172033;
+            font-size: 0.88rem;
+            margin-bottom: 3px;
+        }
+        .timeline-content span {
+            display: block;
+            color: #526176;
+            font-size: 0.83rem;
+            line-height: 1.35;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
         @media (max-width: 980px) {
             .doctor-shell {
                 max-width: 100%;
+            }
+            .timeline-item {
+                grid-template-columns: 1fr;
+                gap: 4px;
             }
         }
         div[data-testid="stSlider"] {
@@ -2256,8 +2360,8 @@ def main() -> None:
             render_parameters(installments, radars, present_value, projection)
 
         st.subheader("Comentários / Marcos")
-        timeline = build_timeline_comments(advance_date, grace_end, installments, radars)
-        st.dataframe(timeline, use_container_width=True, hide_index=True)
+        timeline = build_timeline_comments(advance_date, grace_end, installments, radars, projection=projection)
+        render_timeline_comments(timeline)
 
     with tab_delay:
         st.caption(
@@ -2474,8 +2578,15 @@ def main() -> None:
             st.dataframe(result_table, use_container_width=True, hide_index=True)
 
         with st.expander("Comentários / marcos do cenário", expanded=False):
-            risk_timeline = build_timeline_comments(advance_date, grace_end, installments, radars, liquidation)
-            st.dataframe(risk_timeline, use_container_width=True, hide_index=True)
+            risk_timeline = build_timeline_comments(
+                advance_date,
+                grace_end,
+                installments,
+                radars,
+                projection=projection,
+                liquidation=liquidation,
+            )
+            render_timeline_comments(risk_timeline)
 
     st.session_state["_previous_area"] = selected_area
 
