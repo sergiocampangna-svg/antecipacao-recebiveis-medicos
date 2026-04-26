@@ -806,6 +806,7 @@ def build_projection(
     dc_value: float,
     operational_variable_pct: float = 0.0,
     operational_fixed_cost: float = 0.0,
+    operational_cost_allocation: str = "Diluído nas parcelas",
     total_term_days: int | None = None,
     installment_count: int | None = None,
     installment_amount: float | None = None,
@@ -904,6 +905,7 @@ def build_projection(
         "financial_present_value": financial_present_value,
         "operational_variable_pct": operational_variable_pct,
         "operational_fixed_cost_input": operational_fixed_cost,
+        "operational_cost_allocation": operational_cost_allocation,
         "anticipation_monthly_rate_pct": anticipation_monthly_rate_pct,
         **cost_breakdown,
         "installments": installments,
@@ -1174,6 +1176,7 @@ def render_assumptions(
         ("Desconto financeiro", format_brl(float(projection["financial_cost"]))),
         ("Custo operacional variável", format_brl(float(projection["operational_variable_cost"]))),
         ("Custo operacional fixo", format_brl(float(projection["operational_fixed_cost"]))),
+        ("Alocação custo operacional", str(projection["operational_cost_allocation"])),
         ("Valor líquido creditado", format_brl(present_value)),
         ("Taxa de antecipação total", f"{format_pct(float(projection['equivalent_operation_rate']) * 100)} da operação"),
     ]
@@ -1220,6 +1223,9 @@ def render_parameters(
     )
     st.caption(
         "Taxa de antecipação mensal = juros/capital + custo variável + custo fixo convertido em % do DC."
+    )
+    st.caption(
+        f"Custo operacional nos marcos: {projection['operational_cost_allocation']}."
     )
     st.caption(
         f"Taxa de antecipação total = custo total / DC = {format_pct(float(projection['equivalent_operation_rate']) * 100)}."
@@ -1296,16 +1302,22 @@ def build_timeline_comments(
         if breakdown:
             principal_amount = breakdown["principal"]
             interest_and_cost = breakdown["interest_and_cost"]
+            financial_interest = breakdown["financial_interest"]
+            operational_cost = breakdown["operational_cost"]
             qmm_reference = breakdown["qmm_due"]
         else:
             principal_amount = item.present_value
             interest_and_cost = item.amount - principal_amount
+            financial_interest = interest_and_cost
+            operational_cost = 0.0
             qmm_reference = item.amount
         payment_comment = (
             f"Cobrança acumulada sobe em {format_brl(item.amount)}: "
             f"principal {format_brl(principal_amount)}; "
-            f"juros + custo operacional {format_brl(interest_and_cost)} "
-            f"(QMM de referência {format_brl(qmm_reference)})."
+            f"juros {format_brl(financial_interest)}; "
+            f"custo operacional {format_brl(operational_cost)} "
+            f"(juros + custo operacional {format_brl(interest_and_cost)}; "
+            f"QMM de referência {format_brl(qmm_reference)})."
         )
         if liquidation:
             table = liquidation["result_table"]
@@ -1317,8 +1329,10 @@ def build_timeline_comments(
                 mora = float(row.iloc[0]["Mora"])
                 payment_comment = (
                     f"Previsto: principal {format_brl(principal_amount)}; "
-                    f"juros + custo operacional {format_brl(interest_and_cost)} "
-                    f"(QMM de referência {format_brl(qmm_reference)}). "
+                    f"juros {format_brl(financial_interest)}; "
+                    f"custo operacional {format_brl(operational_cost)} "
+                    f"(juros + custo operacional {format_brl(interest_and_cost)}; "
+                    f"QMM de referência {format_brl(qmm_reference)}). "
                     f"{status}: pago {format_brl(paid)}; "
                     f"atraso acumulado {format_brl(overdue)}; mora {format_brl(mora)}."
                 )
@@ -1378,8 +1392,37 @@ def build_qmm_collection_breakdown(
             "qmm_due": qmm_at_due,
             "principal": principal_amount,
             "interest_and_cost": interest_and_cost,
+            "financial_interest": interest_and_cost,
+            "operational_cost": 0.0,
         }
         previous_qmm = qmm_at_due
+
+    operational_total = float(projection.get("operational_total_cost", 0.0))
+    allocation_mode = str(projection.get("operational_cost_allocation", "Diluído nas parcelas"))
+    if operational_total > 0 and breakdown:
+        if allocation_mode == "Na primeira parcela":
+            targets = {
+                item.number: operational_total if index == 0 else 0.0
+                for index, item in enumerate(installments)
+            }
+        else:
+            installment_total = sum(item.amount for item in installments)
+            targets = {
+                item.number: operational_total * (item.amount / installment_total)
+                if installment_total > 0
+                else 0.0
+                for item in installments
+            }
+
+        residual = 0.0
+        for item in installments:
+            row = breakdown[item.number]
+            available_spread = row["interest_and_cost"]
+            desired_operational = targets[item.number] + residual
+            operational_cost = min(desired_operational, available_spread)
+            residual = max(desired_operational - operational_cost, 0.0)
+            row["operational_cost"] = operational_cost
+            row["financial_interest"] = max(available_spread - operational_cost, 0.0)
     return breakdown
 
 
@@ -1826,6 +1869,10 @@ def get_fund_defaults() -> dict[str, object]:
             "monthly_rate_pct": float(request.get("monthly_rate_pct", 2.5)),
             "operational_variable_pct": float(request.get("operational_variable_pct", 0.0)),
             "operational_fixed_cost": float(request.get("operational_fixed_cost", 0.0)),
+            "operational_cost_allocation": st.session_state.get(
+                "fund_operational_cost_allocation",
+                "Diluído nas parcelas",
+            ),
             "grace_days": int(request.get("grace_days", 30)),
             "dc_value": min(float(request.get("requested_value", 100000.0)), credit_limit),
             "credit_limit": credit_limit,
@@ -1843,6 +1890,7 @@ def get_fund_defaults() -> dict[str, object]:
         "monthly_rate_pct": float(st.session_state.get("fund_monthly_rate_pct", request.get("monthly_rate_pct", 2.5))),
         "operational_variable_pct": float(st.session_state.get("fund_operational_variable_pct", request.get("operational_variable_pct", 0.0))),
         "operational_fixed_cost": float(st.session_state.get("fund_operational_fixed_cost", request.get("operational_fixed_cost", 0.0))),
+        "operational_cost_allocation": st.session_state.get("fund_operational_cost_allocation", "Diluído nas parcelas"),
         "grace_days": int(st.session_state.get("fund_grace_days", request.get("grace_days", 30))),
         "dc_value": min(float(st.session_state.get("fund_dc_value", request.get("requested_value", 100000.0))), credit_limit),
         "credit_limit": credit_limit,
@@ -1859,6 +1907,7 @@ def sync_fund_widget_state(defaults: dict[str, object]) -> None:
     st.session_state["fund_monthly_rate_pct"] = defaults["monthly_rate_pct"]
     st.session_state["fund_operational_variable_pct"] = defaults["operational_variable_pct"]
     st.session_state["fund_operational_fixed_cost"] = defaults["operational_fixed_cost"]
+    st.session_state["fund_operational_cost_allocation"] = defaults["operational_cost_allocation"]
     st.session_state["fund_grace_days"] = defaults["grace_days"]
     st.session_state["fund_dc_value"] = min(float(defaults["dc_value"]), float(defaults["credit_limit"]))
     st.session_state["fund_split_automatically"] = True
@@ -2239,6 +2288,18 @@ def main() -> None:
             step=50.0,
             key="fund_operational_fixed_cost",
         )
+        operational_allocation_options = ["Diluído nas parcelas", "Na primeira parcela"]
+        operational_cost_allocation = st.selectbox(
+            "Alocação do custo operacional nos marcos",
+            options=operational_allocation_options,
+            index=operational_allocation_options.index(str(defaults["operational_cost_allocation"]))
+            if str(defaults["operational_cost_allocation"]) in operational_allocation_options
+            else 0,
+            key="fund_operational_cost_allocation",
+        )
+        st.caption(
+            "Define onde o custo operacional será destacado na abertura principal / juros / custo operacional dos marcos."
+        )
         grace_days = st.number_input(
             "Carência (dias corridos)",
             min_value=0,
@@ -2282,6 +2343,7 @@ def main() -> None:
             monthly_rate_pct=float(monthly_rate_pct),
             operational_variable_pct=float(operational_variable_pct),
             operational_fixed_cost=float(operational_fixed_cost),
+            operational_cost_allocation=str(operational_cost_allocation),
             total_term_days=int(total_term_days_input) if total_term_days_input is not None else None,
             grace_days=int(grace_days),
             dc_value=float(dc_value),
