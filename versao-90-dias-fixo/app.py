@@ -1091,17 +1091,6 @@ def calculate_liquidation_impacts(
     }
 
 
-def build_realized_collection_curve(
-    dates: pd.DatetimeIndex,
-    payments: list[tuple[date, float]],
-) -> pd.DataFrame:
-    rows = []
-    for current in dates.date:
-        accumulated = sum(amount for payment_date, amount in payments if current >= payment_date)
-        rows.append({"date": current, "cobranca_realizada": accumulated})
-    return pd.DataFrame(rows)
-
-
 def build_saldo_exigivel_curve(
     dates: pd.DatetimeIndex,
     result_table: pd.DataFrame,
@@ -1228,12 +1217,13 @@ def build_daily_evolution_table(
             collection_interest = 0.0
         radar = active_radar(current, radars)
         radar_value = radar.qmm_value if radar else 0.0
+        qmm_value = float(source_row.get("qmm", 0.0))
         collection_closing = min(collection_opening + collection_interest, dc_value)
         economic_collection_curve = collection_closing if current <= final_date else dc_value
-        collection_curve = min(max(economic_collection_curve, radar_value), dc_value) if current <= final_date else dc_value
+        collection_curve = min(max(economic_collection_curve, qmm_value), dc_value) if current <= final_date else dc_value
 
         opening_charges = collection_curve
-        value_with_qmm = max(opening_charges, radar_value)
+        value_with_qmm = max(opening_charges, qmm_value)
 
         dc_opening = dc_previous
         if current >= accrual_start_date and is_business_day_flag:
@@ -1474,7 +1464,7 @@ def build_projection(
     df = df.merge(fund_curves, on="date", how="left")
     df["curva_economica"] = df["cobranca_financeira"]
     df["qmm_radar_aplicavel"] = df["date"].apply(lambda value: radar_value_on_date(value, radars))
-    df["cobranca_financeira"] = df[["curva_economica", "qmm_radar_aplicavel"]].max(axis=1).clip(upper=dc_value)
+    df["cobranca_financeira"] = df[["curva_economica", "qmm"]].max(axis=1).clip(upper=dc_value)
     spread_base = df["cobranca_financeira"].where(df["date"] <= final_date, df["dc_economico"])
     df["spread_bruto"] = spread_base - df["benchmark"]
     df["fee_performance"] = df["spread_bruto"].clip(lower=0) * (performance_fee_pct / 100)
@@ -1588,14 +1578,7 @@ def apply_liquidation_to_projection(
         )
         df = df.merge(fund_curves, on="date", how="left")
 
-    realized_curve = build_realized_collection_curve(pd.DatetimeIndex(pd.to_datetime(df["date"])), liquidation["payments"])
-    df = df.drop(columns=["cobranca_realizada", "gap_cobranca", "qmm_ajustado"], errors="ignore").merge(
-        realized_curve,
-        on="date",
-        how="left",
-    )
-    df["cobranca_realizada"] = df["cobranca_realizada"].fillna(0.0)
-    df["gap_cobranca"] = (df["cobranca_esperada"] - df["cobranca_realizada"]).clip(lower=0)
+    df = df.drop(columns=["qmm_ajustado"], errors="ignore")
     saldo_curve = build_saldo_exigivel_curve(pd.DatetimeIndex(pd.to_datetime(df["date"])), liquidation["result_table"])
     df = df.merge(saldo_curve, on="date", how="left")
     df["saldo_exigivel_curve"] = df["saldo_exigivel_curve"].fillna(0.0)
@@ -1673,9 +1656,9 @@ def build_chart(
     fee_axis_max = fee_max * 5.0
     primary_columns = ["qmm", "qmm_ajustado", "cobranca_financeira", "benchmark", "dc_economico"]
     primary_min = float(df[primary_columns].min().min())
-    primary_max = max(dc_value, float(df[primary_columns].max().max()))
-    transbordo_buffer = max(primary_max * 0.055, fee_max * 0.35, dc_value * 0.025, 1.0)
-    valor_a_receber = primary_max + transbordo_buffer
+    receivable_value = float(projection.get("receivable_value", dc_value))
+    primary_max = max(dc_value, receivable_value, float(df[primary_columns].max().max()))
+    valor_a_receber = max(receivable_value, dc_value)
     df = df.copy()
     df["valor_a_receber"] = valor_a_receber
 
@@ -2264,7 +2247,6 @@ def render_parameters(
         st.markdown("**Atraso / Mora**")
         st.caption(f"Mora: {format_pct(params.monthly_late_rate * 100)} ao mês, calculada por juros simples diários.")
         st.caption("Saldo exigível = atraso acumulado + mora + multa.")
-        st.caption("Gap = cobrança esperada - cobrança realizada.")
         if params.adjusted_qmm_enabled:
             st.caption("QMM ajustado = QMM referência - saldo exigível em aberto.")
 
@@ -4049,7 +4031,6 @@ def main() -> None:
             st.markdown(
                 "- Parcelas não selecionadas são consideradas pagas integralmente no vencimento.\n"
                 "- A cobrança esperada preserva o cronograma contratual original.\n"
-                "- A cobrança realizada considera apenas pagamentos efetivos e adicionais simulados.\n"
                 "- Mora = saldo vencido x taxa diária equivalente, após a tolerância definida.\n"
                 "- Multa gerada = multa fixa + percentual configurado sobre o valor vencido não pago.\n"
                 "- A memória mostra mora e multa geradas no ciclo, mesmo quando foram quitadas por pagamento adicional.\n"
