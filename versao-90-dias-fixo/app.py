@@ -27,6 +27,9 @@ DEFAULT_BENCHMARK_ANNUAL_PCT = 14.75
 DEFAULT_BENCHMARK_MODE = "Avançado"
 DEFAULT_CESSION_FEE_PCT = 0.10
 DEFAULT_PERFORMANCE_FEE_PCT = 10.0
+PRICING_POLICY_RATE = "Taxa de antecipação informada"
+PRICING_POLICY_TARGET_XIRR = "XIRR alvo do fundo"
+DEFAULT_TARGET_XIRR_FUND_ANNUAL_PCT = 60.0
 DEFAULT_BENCHMARK_RATE_POINTS = [
     (date(2026, 4, 1), 14.75),
     (date(2026, 4, 2), 14.75),
@@ -507,6 +510,99 @@ def calculate_present_value(
             )
         )
     return sum(item.present_value for item in installments), installments
+
+
+def solve_monthly_rate_for_target_fund_xirr(
+    target_xirr_annual: float,
+    *,
+    advance_date: date,
+    hospital_payment_day: int,
+    operation_mode: str,
+    grace_days: int,
+    dc_value: float,
+    operational_variable_pct: float,
+    operational_fixed_cost: float,
+    operational_cost_allocation: str,
+    benchmark_annual_pct: float,
+    benchmark_mode: str,
+    benchmark_table: pd.DataFrame | dict | None,
+    cession_fee_pct: float,
+    performance_fee_pct: float,
+    receivable_value: float | None,
+    advance_pct: float,
+    radar_business_days: int,
+    late_monthly_rate_pct: float,
+    late_fine_pct: float,
+    late_fine_fixed: float,
+    vp_sensitive_to_advance_date: bool,
+    total_term_days: int | None,
+    installment_count: int | None,
+    installment_amount: float | None,
+) -> float:
+    if target_xirr_annual <= -0.999:
+        raise ValueError("Informe uma XIRR alvo maior que -99,9% ao ano.")
+
+    def evaluated_xirr(rate_pct: float) -> float:
+        projection = build_projection(
+            advance_date=advance_date,
+            hospital_payment_day=hospital_payment_day,
+            operation_mode=operation_mode,
+            monthly_rate_pct=rate_pct,
+            grace_days=grace_days,
+            dc_value=dc_value,
+            operational_variable_pct=operational_variable_pct,
+            operational_fixed_cost=operational_fixed_cost,
+            operational_cost_allocation=operational_cost_allocation,
+            benchmark_annual_pct=benchmark_annual_pct,
+            benchmark_mode=benchmark_mode,
+            benchmark_table=benchmark_table,
+            cession_fee_pct=cession_fee_pct,
+            performance_fee_pct=performance_fee_pct,
+            receivable_value=receivable_value,
+            advance_pct=advance_pct,
+            radar_business_days=radar_business_days,
+            late_monthly_rate_pct=late_monthly_rate_pct,
+            late_fine_pct=late_fine_pct,
+            late_fine_fixed=late_fine_fixed,
+            vp_sensitive_to_advance_date=vp_sensitive_to_advance_date,
+            total_term_days=total_term_days,
+            installment_count=installment_count,
+            installment_amount=installment_amount,
+            pricing_policy=PRICING_POLICY_RATE,
+            target_xirr_fund_annual_pct=None,
+        )
+        xirr_value = projection.get("xirr_fund_annual")
+        if xirr_value is None:
+            raise ValueError("Não foi possível calcular a XIRR líquida para resolver a taxa de antecipação.")
+        return float(xirr_value)
+
+    low = 0.0
+    high = 10.0
+    low_gap = evaluated_xirr(low) - target_xirr_annual
+    high_gap = evaluated_xirr(high) - target_xirr_annual
+
+    while high_gap < 0 and high < 500:
+        high *= 2
+        high_gap = evaluated_xirr(high) - target_xirr_annual
+
+    if low_gap > 0:
+        raise ValueError("A XIRR alvo está abaixo do retorno mínimo calculado com taxa de antecipação zero.")
+    if high_gap < 0:
+        raise ValueError(
+            "A XIRR alvo não foi atingida mesmo com taxa de antecipação muito elevada. "
+            "Revise o alvo, prazo ou parâmetros do fundo."
+        )
+
+    for _ in range(60):
+        mid = (low + high) / 2
+        mid_gap = evaluated_xirr(mid) - target_xirr_annual
+        if abs(mid_gap) < 1e-8:
+            return mid
+        if mid_gap >= 0:
+            high = mid
+        else:
+            low = mid
+    return (low + high) / 2
 
 
 def calculate_operational_costs(
@@ -1338,8 +1434,9 @@ def build_projection(
     total_term_days: int | None = None,
     installment_count: int | None = None,
     installment_amount: float | None = None,
+    pricing_policy: str = PRICING_POLICY_RATE,
+    target_xirr_fund_annual_pct: float | None = None,
 ) -> dict[str, object]:
-    monthly_rate = monthly_rate_pct / 100
     if receivable_value is not None:
         dc_value = min(dc_value, calculate_credit_limit(receivable_value, advance_pct))
     accrual_start_date = calculate_accrual_start_date(advance_date, hospital_payment_day)
@@ -1381,6 +1478,38 @@ def build_projection(
     if operation_mode == "Por prazo total" and total_term_days is not None:
         accrual_start_date = calculate_accrual_start_date_from_final(final_date, total_term_days)
     grace_end = first_installment_cycle_date(advance_date, hospital_payment_day, grace_days)
+
+    if pricing_policy == PRICING_POLICY_TARGET_XIRR:
+        if target_xirr_fund_annual_pct is None:
+            raise ValueError("Informe a XIRR alvo do fundo.")
+        monthly_rate_pct = solve_monthly_rate_for_target_fund_xirr(
+            target_xirr_fund_annual_pct / 100,
+            advance_date=advance_date,
+            hospital_payment_day=hospital_payment_day,
+            operation_mode=operation_mode,
+            grace_days=grace_days,
+            dc_value=dc_value,
+            operational_variable_pct=operational_variable_pct,
+            operational_fixed_cost=operational_fixed_cost,
+            operational_cost_allocation=operational_cost_allocation,
+            benchmark_annual_pct=benchmark_annual_pct,
+            benchmark_mode=benchmark_mode,
+            benchmark_table=benchmark_table,
+            cession_fee_pct=cession_fee_pct,
+            performance_fee_pct=performance_fee_pct,
+            receivable_value=receivable_value,
+            advance_pct=advance_pct,
+            radar_business_days=radar_business_days,
+            late_monthly_rate_pct=late_monthly_rate_pct,
+            late_fine_pct=late_fine_pct,
+            late_fine_fixed=late_fine_fixed,
+            vp_sensitive_to_advance_date=vp_sensitive_to_advance_date,
+            total_term_days=total_term_days,
+            installment_count=installment_count,
+            installment_amount=installment_amount,
+        )
+
+    monthly_rate = monthly_rate_pct / 100
     annual_operation_rate = calcular_taxa_anual_equivalente(monthly_rate)
     operation_business_days = contar_dias_uteis(accrual_start_date, final_date, PARAMETRIZED_HOLIDAYS)
     vp_start_date, vp_end_date = obter_datas_base_vp(
@@ -1517,6 +1646,9 @@ def build_projection(
         "input_total_term_days": input_total_term_days,
         "real_total_term_days": real_total_term_days,
         "operation_mode": operation_mode,
+        "pricing_policy": pricing_policy,
+        "target_xirr_fund_annual_pct": target_xirr_fund_annual_pct,
+        "monthly_rate_pct": monthly_rate_pct,
         "calculated_installment_count": calculated_installment_count,
         "installment_amount": installment_amount,
         "chart_end_date": chart_end_date,
@@ -1927,6 +2059,7 @@ def render_operation_summary(
         ("Limite de crédito / DC", format_brl(dc_value)),
         ("VP creditado ao médico", format_brl(present_value)),
         ("Custo da antecipação", format_brl(float(projection["anticipation_cost"]))),
+        ("Política de precificação", str(projection["pricing_policy"])),
         ("Política de cálculo do VP", str(projection["vp_policy_label"])),
         (
             "Taxa da operação",
@@ -2012,6 +2145,13 @@ def render_calculation_details(projection: dict[str, object]) -> None:
             f"{format_date_pt(projection['vp_start_date'])} e {format_date_pt(projection['vp_end_date'])}, "
             "excluindo sábados, domingos e feriados parametrizados."
         )
+        if projection["pricing_policy"] == PRICING_POLICY_TARGET_XIRR:
+            st.caption(
+                "Precificação por XIRR alvo: a taxa mensal da antecipação é resolvida numericamente "
+                f"para buscar XIRR líquida FIDC de {format_pct(float(projection['target_xirr_fund_annual_pct']))} a.a."
+            )
+        else:
+            st.caption("Precificação por taxa: a taxa mensal é input e a XIRR é calculada como output.")
         if projection["vp_sensitive_to_advance_date"]:
             st.caption(
                 "O VP é calculado a partir da data da antecipação; o custo financeiro reflete o período completo entre desembolso e vencimento."
@@ -3047,6 +3187,10 @@ def save_doctor_request_to_state(offer: dict[str, object], credit_limit: float) 
         "total_term_days": DOCTOR_FIXED_TERM_DAYS,
         "hospital_payment_day": offer["hospital_payment_day"],
         "monthly_rate_pct": offer["monthly_rate_pct"],
+        "pricing_policy": st.session_state.get("fund_pricing_policy", PRICING_POLICY_RATE),
+        "target_xirr_fund_annual_pct": float(
+            st.session_state.get("fund_target_xirr_fund_annual_pct", DEFAULT_TARGET_XIRR_FUND_ANNUAL_PCT)
+        ),
         "operational_variable_pct": 0.0,
         "operational_fixed_cost": 0.0,
         "benchmark_annual_pct": st.session_state.get("fund_benchmark_annual_pct", DEFAULT_BENCHMARK_ANNUAL_PCT),
@@ -3077,13 +3221,24 @@ def get_fund_defaults() -> dict[str, object]:
     receivable_default = float(request.get("receivable_value", st.session_state.get("fund_receivable_value", DEFAULT_RECEIVABLE_VALUE)))
     advance_pct_default = float(request.get("advance_pct", st.session_state.get("fund_advance_pct", DEFAULT_ADVANCE_PCT)))
     credit_limit = calculate_credit_limit(receivable_default, advance_pct_default)
+    pricing_policy_default = st.session_state.get("fund_pricing_policy", request.get("pricing_policy", PRICING_POLICY_RATE))
+    rate_state_key = "fund_effective_monthly_rate_pct" if pricing_policy_default == PRICING_POLICY_TARGET_XIRR else "fund_monthly_rate_pct"
+    monthly_rate_default = float(st.session_state.get(rate_state_key, request.get("monthly_rate_pct", DEFAULT_MONTHLY_RATE_PCT)))
+    target_xirr_default = float(
+        st.session_state.get(
+            "fund_target_xirr_fund_annual_pct",
+            request.get("target_xirr_fund_annual_pct", DEFAULT_TARGET_XIRR_FUND_ANNUAL_PCT),
+        )
+    )
     if request and st.session_state.get("doctor_request_pending_sync"):
         return {
             "advance_date": request.get("request_date", DEFAULT_ADVANCE_DATE),
             "hospital_payment_day": int(request.get("hospital_payment_day", DEFAULT_HOSPITAL_BUSINESS_DAY)),
             "installment_count": max(1, min(int(request.get("installment_count", 3)), 4)),
             "total_term_days": int(request.get("total_term_days", DOCTOR_FIXED_TERM_DAYS)),
-            "monthly_rate_pct": float(request.get("monthly_rate_pct", DEFAULT_MONTHLY_RATE_PCT)),
+            "monthly_rate_pct": monthly_rate_default,
+            "pricing_policy": pricing_policy_default,
+            "target_xirr_fund_annual_pct": target_xirr_default,
             "operational_variable_pct": 0.0,
             "operational_fixed_cost": 0.0,
             "operational_cost_allocation": "Diluído nas parcelas",
@@ -3112,7 +3267,9 @@ def get_fund_defaults() -> dict[str, object]:
         "hospital_payment_day": int(st.session_state.get("fund_hospital_payment_day", request.get("hospital_payment_day", DEFAULT_HOSPITAL_BUSINESS_DAY))),
         "installment_count": max(1, min(int(installment_count), 4)),
         "total_term_days": int(st.session_state.get("fund_total_term_days", request.get("total_term_days", DOCTOR_FIXED_TERM_DAYS))),
-        "monthly_rate_pct": float(st.session_state.get("fund_monthly_rate_pct", request.get("monthly_rate_pct", DEFAULT_MONTHLY_RATE_PCT))),
+        "monthly_rate_pct": monthly_rate_default,
+        "pricing_policy": pricing_policy_default,
+        "target_xirr_fund_annual_pct": target_xirr_default,
         "operational_variable_pct": 0.0,
         "operational_fixed_cost": 0.0,
         "operational_cost_allocation": "Diluído nas parcelas",
@@ -3141,6 +3298,8 @@ def sync_fund_widget_state(defaults: dict[str, object]) -> None:
     st.session_state["fund_operation_mode"] = "Por prazo total"
     st.session_state["fund_installment_count"] = max(1, min(int(defaults["installment_count"]), 4))
     st.session_state["fund_monthly_rate_pct"] = defaults["monthly_rate_pct"]
+    st.session_state["fund_pricing_policy"] = defaults["pricing_policy"]
+    st.session_state["fund_target_xirr_fund_annual_pct"] = defaults["target_xirr_fund_annual_pct"]
     st.session_state["fund_benchmark_annual_pct"] = defaults["benchmark_annual_pct"]
     st.session_state["fund_benchmark_mode"] = defaults["benchmark_mode"]
     st.session_state["fund_cession_fee_pct"] = defaults["cession_fee_pct"]
@@ -3539,6 +3698,12 @@ def main() -> None:
     sync_fund_widget_state(defaults)
     st.title("Simulação de Antecipação de Recebíveis Médicos")
     st.caption("Curvas executivas de QMM, cobrança e Direito Creditório com radar mensal calculado em dias úteis.")
+    nav_col, _ = st.columns([0.28, 0.72])
+    with nav_col:
+        if st.button("← Solicitar antecipação", key="go_to_doctor_app", use_container_width=True):
+            st.session_state["pending_selected_area"] = "Aplicação do Médico"
+            st.session_state["_previous_area"] = "Aplicação do Fundo"
+            st.rerun()
 
     with st.sidebar:
         st.header("Inputs operacionais")
@@ -3627,13 +3792,34 @@ def main() -> None:
         st.metric("Limite de crédito calculado", format_brl(credit_limit))
         st.caption("Limite de crédito = valor bruto a receber x percentual antecipável. Neste modelo, DC máximo = limite de crédito.")
         st.metric("DC / valor de face da operação", format_brl(dc_value))
-        monthly_rate_pct = st.number_input(
-            "Custo da antecipação (% ao mês)",
-            min_value=0.0,
-            value=float(defaults["monthly_rate_pct"]),
-            step=0.1,
-            key="fund_monthly_rate_pct",
+        pricing_policy = st.radio(
+            "Política de precificação",
+            [PRICING_POLICY_RATE, PRICING_POLICY_TARGET_XIRR],
+            index=[PRICING_POLICY_RATE, PRICING_POLICY_TARGET_XIRR].index(str(defaults["pricing_policy"]))
+            if str(defaults["pricing_policy"]) in [PRICING_POLICY_RATE, PRICING_POLICY_TARGET_XIRR]
+            else 0,
+            key="fund_pricing_policy",
         )
+        if pricing_policy == PRICING_POLICY_RATE:
+            monthly_rate_pct = st.number_input(
+                "Custo da antecipação (% ao mês)",
+                min_value=0.0,
+                value=float(defaults["monthly_rate_pct"]),
+                step=0.1,
+                key="fund_monthly_rate_pct",
+            )
+            target_xirr_fund_annual_pct = float(defaults["target_xirr_fund_annual_pct"])
+            st.caption("A taxa de antecipação é input; a XIRR do fundo é calculada como output.")
+        else:
+            target_xirr_fund_annual_pct = st.number_input(
+                "XIRR alvo líquida do fundo (% a.a.)",
+                min_value=0.0,
+                value=float(defaults["target_xirr_fund_annual_pct"]),
+                step=1.0,
+                key="fund_target_xirr_fund_annual_pct",
+            )
+            monthly_rate_pct = float(defaults["monthly_rate_pct"])
+            st.caption("A XIRR alvo é input; a taxa de antecipação é calculada para atingir esse retorno.")
         operational_variable_pct = 0.0
         operational_fixed_cost = 0.0
         operational_cost_allocation = "Diluído nas parcelas"
@@ -3745,12 +3931,16 @@ def main() -> None:
             dc_value=float(dc_value),
             installment_count=int(installment_count_input) if installment_count_input is not None else None,
             installment_amount=float(installment_amount) if installment_amount is not None else None,
+            pricing_policy=str(pricing_policy),
+            target_xirr_fund_annual_pct=float(target_xirr_fund_annual_pct),
         )
     except ValueError as exc:
         st.error(str(exc))
         st.stop()
 
     present_value = float(projection["present_value"])
+    monthly_rate_pct = float(projection["monthly_rate_pct"])
+    st.session_state["fund_effective_monthly_rate_pct"] = monthly_rate_pct
     financial_present_value = float(projection["financial_present_value"])
     financial_cost = float(projection["financial_cost"])
     operational_total_cost = float(projection["operational_total_cost"])
@@ -3786,7 +3976,13 @@ def main() -> None:
         st.metric("Repasses elegíveis", installment_count)
         st.caption(f"Valor nominal por repasse: {format_brl(installment_amount)}")
         st.caption(f"Última liquidação prevista: {format_date_pt(projection['final_date'])}")
-        st.caption(f"Taxa mensal da antecipação: {format_pct(anticipation_monthly_rate_pct)} ao mês")
+        if projection["pricing_policy"] == PRICING_POLICY_TARGET_XIRR:
+            st.caption(
+                "Taxa mensal calculada pela XIRR alvo: "
+                f"{format_pct(anticipation_monthly_rate_pct)} ao mês"
+            )
+        else:
+            st.caption(f"Taxa mensal da antecipação: {format_pct(anticipation_monthly_rate_pct)} ao mês")
         st.caption(f"Taxa de antecipação total: {format_pct(equivalent_operation_rate * 100)} da operação")
 
     tab_main = st.container()
