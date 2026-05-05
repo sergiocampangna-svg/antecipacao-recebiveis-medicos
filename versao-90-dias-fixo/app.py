@@ -17,7 +17,9 @@ DC_COLOR = "#111111"
 RADAR_COLOR = "rgba(33, 94, 150, 0.13)"
 GRID_COLOR = "#e8edf3"
 DOCTOR_FIXED_TERM_DAYS = 90
-FIXED_GRACE_RULE_DESCRIPTION = "primeiro pagamento hospitalar do mês seguinte à antecipação"
+DEFAULT_GRACE_DAYS = 30
+DEFAULT_ACCRUAL_START_DELAY_DAYS = 30
+FIXED_GRACE_RULE_DESCRIPTION = "primeiro pagamento hospitalar elegível após a carência configurada"
 DEFAULT_RECEIVABLE_VALUE = 125000.0
 DEFAULT_ADVANCE_PCT = 80.0
 DEFAULT_ADVANCE_DATE = date(2026, 4, 1)
@@ -220,9 +222,10 @@ def first_installment_cycle_date(
     hospital_payment_day: int,
     grace_days: int,
 ) -> date:
-    # Na versão de 90 dias fixos, a carência é uma trava operacional:
-    # a liquidação nunca ocorre no mesmo mês da antecipação.
-    return month_payment_date(add_months(advance_date, 1), hospital_payment_day)
+    # A carência é a trava operacional para definir o primeiro repasse elegível.
+    # O radar só passa a considerar pagamentos hospitalares em ou após essa data.
+    eligibility_date = advance_date + timedelta(days=max(int(grace_days), 0))
+    return hospital_payment_on_or_after(eligibility_date, hospital_payment_day)
 
 
 def calculate_accrual_start_date(advance_date: date, hospital_payment_day: int) -> date:
@@ -235,6 +238,10 @@ def calculate_accrual_start_date(advance_date: date, hospital_payment_day: int) 
 def calculate_accrual_start_date_from_final(final_date: date, total_term_days: int) -> date:
     # Convenção da planilha: WORKDAY(DataVencimento - Prazo + 1, -1, feriados).
     return excel_workday(final_date - timedelta(days=total_term_days - 1), -1, PARAMETRIZED_HOLIDAYS)
+
+
+def calculate_accrual_start_date_from_delay(advance_date: date, accrual_start_delay_days: int) -> date:
+    return advance_date + timedelta(days=max(int(accrual_start_delay_days), 0))
 
 
 def generate_hospital_cycles(
@@ -287,7 +294,7 @@ def calculate_installment_dates_by_term(
     if total_term_days < 1:
         raise ValueError("Informe um prazo total maior que zero.")
 
-    limit_date = hospital_payment_on_or_after(advance_date + timedelta(days=total_term_days), hospital_payment_day)
+    limit_date = advance_date + timedelta(days=total_term_days)
     installment_dates = generate_hospital_cycles(
         advance_date=advance_date,
         hospital_payment_day=hospital_payment_day,
@@ -538,6 +545,7 @@ def solve_monthly_rate_for_target_fund_xirr(
     total_term_days: int | None,
     installment_count: int | None,
     installment_amount: float | None,
+    accrual_start_delay_days: int = DEFAULT_ACCRUAL_START_DELAY_DAYS,
 ) -> float:
     if target_xirr_annual <= -0.999:
         raise ValueError("Informe uma XIRR alvo maior que -99,9% ao ano.")
@@ -570,6 +578,7 @@ def solve_monthly_rate_for_target_fund_xirr(
             installment_amount=installment_amount,
             pricing_policy=PRICING_POLICY_RATE,
             target_xirr_fund_annual_pct=None,
+            accrual_start_delay_days=accrual_start_delay_days,
         )
         xirr_value = projection.get("xirr_fund_annual")
         if xirr_value is None:
@@ -1436,10 +1445,11 @@ def build_projection(
     installment_amount: float | None = None,
     pricing_policy: str = PRICING_POLICY_RATE,
     target_xirr_fund_annual_pct: float | None = None,
+    accrual_start_delay_days: int = DEFAULT_ACCRUAL_START_DELAY_DAYS,
 ) -> dict[str, object]:
     if receivable_value is not None:
         dc_value = min(dc_value, calculate_credit_limit(receivable_value, advance_pct))
-    accrual_start_date = calculate_accrual_start_date(advance_date, hospital_payment_day)
+    accrual_start_date = calculate_accrual_start_date_from_delay(advance_date, accrual_start_delay_days)
 
     if operation_mode == "Por parcelas":
         if installment_count is None:
@@ -1475,8 +1485,11 @@ def build_projection(
     installment_amount = dc_value / calculated_installment_count
 
     final_date = max(installment_dates)
-    if operation_mode == "Por prazo total" and total_term_days is not None:
-        accrual_start_date = calculate_accrual_start_date_from_final(final_date, total_term_days)
+    operation_limit_date = (
+        advance_date + timedelta(days=total_term_days)
+        if operation_mode == "Por prazo total" and total_term_days is not None
+        else final_date
+    )
     grace_end = first_installment_cycle_date(advance_date, hospital_payment_day, grace_days)
 
     if pricing_policy == PRICING_POLICY_TARGET_XIRR:
@@ -1507,6 +1520,7 @@ def build_projection(
             total_term_days=total_term_days,
             installment_count=installment_count,
             installment_amount=installment_amount,
+            accrual_start_delay_days=accrual_start_delay_days,
         )
 
     monthly_rate = monthly_rate_pct / 100
@@ -1623,10 +1637,12 @@ def build_projection(
         "receivable_value": receivable_value if receivable_value is not None else dc_value,
         "advance_pct": advance_pct,
         "radar_business_days": radar_business_days,
+        "grace_days": grace_days,
         "late_monthly_rate_pct": late_monthly_rate_pct,
         "late_fine_pct": late_fine_pct,
         "late_fine_fixed": late_fine_fixed,
         "vp_sensitive_to_advance_date": vp_sensitive_to_advance_date,
+        "accrual_start_delay_days": accrual_start_delay_days,
         "vp_policy_label": "Baseado na data da antecipação"
         if vp_sensitive_to_advance_date
         else "Baseado no início do accrual",
@@ -1643,6 +1659,7 @@ def build_projection(
         "radars": radars,
         "final_date": final_date,
         "contractual_final_date": contractual_final_date,
+        "operation_limit_date": operation_limit_date,
         "input_total_term_days": input_total_term_days,
         "real_total_term_days": real_total_term_days,
         "operation_mode": operation_mode,
@@ -2052,8 +2069,12 @@ def render_operation_summary(
     rows = [
         ("Data da antecipação", format_date_pt(advance_date)),
         ("Início do accrual QMM", format_date_pt(projection["accrual_start_date"])),
-        ("Prazo total da operação", f"{int(projection['input_total_term_days'])} dias"),
-        ("Data limite da operação", format_date_pt(projection["contractual_final_date"])),
+        ("Dias até início do accrual", f"{int(projection['accrual_start_delay_days'])} dias corridos"),
+        ("Carência do primeiro repasse", f"{int(projection['grace_days'])} dias corridos"),
+        ("Prazo limite da operação", f"{int(projection['input_total_term_days'])} dias"),
+        ("Data limite da operação", format_date_pt(projection["operation_limit_date"])),
+        ("Prazo efetivo até liquidação", f"{int(projection['real_total_term_days'])} dias"),
+        ("Última liquidação prevista", format_date_pt(projection["final_date"])),
         ("Valor bruto a receber", format_brl(float(projection["receivable_value"]))),
         ("Percentual antecipável", format_pct(float(projection["advance_pct"]))),
         ("Limite de crédito / DC", format_brl(dc_value)),
@@ -2247,10 +2268,12 @@ def render_assumptions(
         ("Limite de crédito calculado", format_brl(calculate_credit_limit(float(projection["receivable_value"]), float(projection["advance_pct"])))),
         ("DC / valor de face da operação", format_brl(dc_value)),
         ("Parcelas do médico", f"{installment_count} x {format_brl(installment_amount)}"),
-        ("Prazo total da operação", f"{int(input_total_term_days)} dias corridos"),
-        ("Data limite da operação", format_date_pt(contractual_final_date)),
+        ("Prazo limite da operação", f"{int(input_total_term_days)} dias corridos"),
+        ("Data limite da operação", format_date_pt(projection["operation_limit_date"])),
+        ("Prazo efetivo até liquidação", f"{int(projection['real_total_term_days'])} dias corridos"),
         ("Última liquidação prevista", format_date_pt(final_date)),
-        ("Regra de carência", FIXED_GRACE_RULE_DESCRIPTION),
+        ("Carência do primeiro repasse", f"{int(projection['grace_days'])} dias corridos"),
+        ("Dias até início do accrual", f"{int(projection['accrual_start_delay_days'])} dias corridos"),
         ("Início do accrual QMM", format_date_pt(projection["accrual_start_date"])),
         ("Dias úteis da operação", str(int(projection["operation_business_days"]))),
         ("Custo da antecipação", f"{format_pct(monthly_rate_pct)} ao mês"),
@@ -2363,12 +2386,13 @@ def render_parameters(
         f"a quantidade calculada é {projection['calculated_installment_count']} parcelas."
     )
     st.caption(
-        f"Data limite da operação: {format_date_pt(projection['contractual_final_date'])}. "
-        f"Última liquidação prevista: {format_date_pt(projection['final_date'])}."
+        f"Data limite da operação: {format_date_pt(projection['operation_limit_date'])}. "
+        f"Última liquidação prevista: {format_date_pt(projection['final_date'])}. "
+        f"Prazo efetivo até liquidação: {int(projection['real_total_term_days'])} dias."
     )
 
     st.markdown("**Datas das parcelas**")
-    st.caption("A primeira liquidação elegível ocorre no pagamento hospitalar do mês seguinte à antecipação; as demais seguem mensalmente.")
+    st.caption("A primeira liquidação elegível ocorre no primeiro pagamento hospitalar em ou após a carência configurada; as demais seguem mensalmente.")
     for item in installments:
         st.caption(
             f"Parcela {item.number}: {format_date_pt(item.due_date)} | "
@@ -2428,7 +2452,7 @@ def build_timeline_comments(
         {
             "Data": format_date_pt(grace_end),
             "Marco": "Primeiro pagamento elegível",
-            "Comentário": "A carência operacional impede liquidação no mesmo mês da antecipação; o primeiro desconto ocorre no pagamento hospitalar do mês seguinte.",
+            "Comentário": "A carência operacional define o primeiro pagamento hospitalar elegível para desconto e radar.",
         },
     ]
     if accrual_start_date:
@@ -2437,8 +2461,8 @@ def build_timeline_comments(
                 "Data": format_date_pt(accrual_start_date),
                 "Marco": "Início do accrual QMM",
                 "Comentário": (
-                    "Data calculada pela comparação entre a antecipação e o pagamento hospitalar "
-                    "do mesmo mês; a partir dela o QMM passa a crescer até os radares."
+                    "Data calculada pela quantidade de dias corridos configurada após a antecipação; "
+                    "a partir dela o QMM passa a crescer até os radares."
                 ),
             }
         )
@@ -3041,6 +3065,7 @@ def calculate_doctor_offer(
     installment_count: int,
     total_term_days: int | None = None,
     vp_sensitive_to_advance_date: bool = False,
+    accrual_start_delay_days: int = DEFAULT_ACCRUAL_START_DELAY_DAYS,
 ) -> dict[str, object]:
     installment_dates = calculate_installment_dates_by_count(
         advance_date=request_date,
@@ -3050,11 +3075,7 @@ def calculate_doctor_offer(
     )
     installment_amount = requested_value / installment_count
     final_date = max(installment_dates)
-    accrual_start_date = (
-        calculate_accrual_start_date_from_final(final_date, total_term_days)
-        if total_term_days is not None
-        else calculate_accrual_start_date(request_date, hospital_payment_day)
-    )
+    accrual_start_date = calculate_accrual_start_date_from_delay(request_date, accrual_start_delay_days)
     financial_present_value, installments = calculate_present_value(
         request_date,
         installment_dates,
@@ -3108,6 +3129,7 @@ def calculate_gross_value_from_net_disbursement(
     operational_fixed_cost: float,
     total_term_days: int | None = None,
     vp_sensitive_to_advance_date: bool = False,
+    accrual_start_delay_days: int = DEFAULT_ACCRUAL_START_DELAY_DAYS,
 ) -> float:
     if net_disbursement <= 0:
         raise ValueError("Informe um valor líquido maior que zero.")
@@ -3115,11 +3137,7 @@ def calculate_gross_value_from_net_disbursement(
     monthly_rate = monthly_rate_pct / 100
     annual_rate = calcular_taxa_anual_equivalente(monthly_rate)
     final_date = max(installment_dates)
-    accrual_start_date = (
-        calculate_accrual_start_date_from_final(final_date, total_term_days)
-        if total_term_days is not None
-        else calculate_accrual_start_date(request_date, hospital_payment_day)
-    )
+    accrual_start_date = calculate_accrual_start_date_from_delay(request_date, accrual_start_delay_days)
     vp_start_date = request_date if vp_sensitive_to_advance_date else accrual_start_date
     business_days = contar_dias_uteis(vp_start_date, final_date, PARAMETRIZED_HOLIDAYS)
     discount_factor = 1 / ((1 + annual_rate) ** (business_days / 252))
@@ -3141,6 +3159,7 @@ def calculate_doctor_offer_from_net(
     desired_net_value: float,
     total_term_days: int = DOCTOR_FIXED_TERM_DAYS,
     vp_sensitive_to_advance_date: bool = False,
+    accrual_start_delay_days: int = DEFAULT_ACCRUAL_START_DELAY_DAYS,
 ) -> dict[str, object]:
     installment_dates = calculate_installment_dates_by_term(
         advance_date=request_date,
@@ -3158,6 +3177,7 @@ def calculate_doctor_offer_from_net(
         operational_fixed_cost,
         total_term_days,
         vp_sensitive_to_advance_date,
+        accrual_start_delay_days,
     )
     return calculate_doctor_offer(
         request_date=request_date,
@@ -3170,6 +3190,7 @@ def calculate_doctor_offer_from_net(
         installment_count=len(installment_dates),
         total_term_days=total_term_days,
         vp_sensitive_to_advance_date=vp_sensitive_to_advance_date,
+        accrual_start_delay_days=accrual_start_delay_days,
     )
 
 
@@ -3184,7 +3205,10 @@ def save_doctor_request_to_state(offer: dict[str, object], credit_limit: float) 
         "requested_value": offer["requested_value"],
         "installment_count": offer["installment_count"],
         "installment_amount": offer["installment_amount"],
-        "total_term_days": DOCTOR_FIXED_TERM_DAYS,
+        "total_term_days": int(
+            st.session_state.get("fund_accrual_start_delay_days", DEFAULT_ACCRUAL_START_DELAY_DAYS)
+        )
+        + DOCTOR_FIXED_TERM_DAYS,
         "hospital_payment_day": offer["hospital_payment_day"],
         "monthly_rate_pct": offer["monthly_rate_pct"],
         "pricing_policy": st.session_state.get("fund_pricing_policy", PRICING_POLICY_RATE),
@@ -3204,6 +3228,7 @@ def save_doctor_request_to_state(offer: dict[str, object], credit_limit: float) 
         "late_fine_pct": float(st.session_state.get("fund_late_fine_pct", 2.0)),
         "late_fine_fixed": float(st.session_state.get("fund_late_fine_fixed", 0.0)),
         "vp_sensitive_to_advance_date": bool(st.session_state.get("fund_vp_sensitive_to_advance_date", False)),
+        "accrual_start_delay_days": int(st.session_state.get("fund_accrual_start_delay_days", DEFAULT_ACCRUAL_START_DELAY_DAYS)),
         "grace_days": offer["grace_days"],
         "first_due_date": offer["first_due_date"],
         "present_value": offer["present_value"],
@@ -3230,12 +3255,20 @@ def get_fund_defaults() -> dict[str, object]:
             request.get("target_xirr_fund_annual_pct", DEFAULT_TARGET_XIRR_FUND_ANNUAL_PCT),
         )
     )
+    accrual_start_delay_default = int(
+        st.session_state.get(
+            "fund_accrual_start_delay_days",
+            request.get("accrual_start_delay_days", DEFAULT_ACCRUAL_START_DELAY_DAYS),
+        )
+    )
+    total_term_default = accrual_start_delay_default + DOCTOR_FIXED_TERM_DAYS
     if request and st.session_state.get("doctor_request_pending_sync"):
         return {
             "advance_date": request.get("request_date", DEFAULT_ADVANCE_DATE),
             "hospital_payment_day": int(request.get("hospital_payment_day", DEFAULT_HOSPITAL_BUSINESS_DAY)),
             "installment_count": max(1, min(int(request.get("installment_count", 3)), 4)),
-            "total_term_days": int(request.get("total_term_days", DOCTOR_FIXED_TERM_DAYS)),
+            "accrual_start_delay_days": accrual_start_delay_default,
+            "total_term_days": total_term_default,
             "monthly_rate_pct": monthly_rate_default,
             "pricing_policy": pricing_policy_default,
             "target_xirr_fund_annual_pct": target_xirr_default,
@@ -3246,7 +3279,7 @@ def get_fund_defaults() -> dict[str, object]:
             "benchmark_mode": st.session_state.get("fund_benchmark_mode", request.get("benchmark_mode", DEFAULT_BENCHMARK_MODE)),
             "cession_fee_pct": float(st.session_state.get("fund_cession_fee_pct", request.get("cession_fee_pct", DEFAULT_CESSION_FEE_PCT))),
             "performance_fee_pct": float(st.session_state.get("fund_performance_fee_pct", request.get("performance_fee_pct", DEFAULT_PERFORMANCE_FEE_PCT))),
-            "grace_days": 0,
+            "grace_days": int(st.session_state.get("fund_grace_days", request.get("grace_days", DEFAULT_GRACE_DAYS))),
             "receivable_value": receivable_default,
             "advance_pct": advance_pct_default,
             "radar_business_days": int(st.session_state.get("fund_radar_business_days", request.get("radar_business_days", 5))),
@@ -3266,7 +3299,8 @@ def get_fund_defaults() -> dict[str, object]:
         "advance_date": st.session_state.get("fund_advance_date", request.get("request_date", DEFAULT_ADVANCE_DATE)),
         "hospital_payment_day": int(st.session_state.get("fund_hospital_payment_day", request.get("hospital_payment_day", DEFAULT_HOSPITAL_BUSINESS_DAY))),
         "installment_count": max(1, min(int(installment_count), 4)),
-        "total_term_days": int(st.session_state.get("fund_total_term_days", request.get("total_term_days", DOCTOR_FIXED_TERM_DAYS))),
+        "accrual_start_delay_days": accrual_start_delay_default,
+        "total_term_days": total_term_default,
         "monthly_rate_pct": monthly_rate_default,
         "pricing_policy": pricing_policy_default,
         "target_xirr_fund_annual_pct": target_xirr_default,
@@ -3277,7 +3311,7 @@ def get_fund_defaults() -> dict[str, object]:
         "benchmark_mode": st.session_state.get("fund_benchmark_mode", request.get("benchmark_mode", DEFAULT_BENCHMARK_MODE)),
         "cession_fee_pct": float(st.session_state.get("fund_cession_fee_pct", request.get("cession_fee_pct", DEFAULT_CESSION_FEE_PCT))),
         "performance_fee_pct": float(st.session_state.get("fund_performance_fee_pct", request.get("performance_fee_pct", DEFAULT_PERFORMANCE_FEE_PCT))),
-        "grace_days": 0,
+        "grace_days": int(st.session_state.get("fund_grace_days", request.get("grace_days", DEFAULT_GRACE_DAYS))),
         "receivable_value": float(st.session_state.get("fund_receivable_value", receivable_default)),
         "advance_pct": float(st.session_state.get("fund_advance_pct", advance_pct_default)),
         "radar_business_days": int(st.session_state.get("fund_radar_business_days", request.get("radar_business_days", 5))),
@@ -3300,6 +3334,8 @@ def sync_fund_widget_state(defaults: dict[str, object]) -> None:
     st.session_state["fund_monthly_rate_pct"] = defaults["monthly_rate_pct"]
     st.session_state["fund_pricing_policy"] = defaults["pricing_policy"]
     st.session_state["fund_target_xirr_fund_annual_pct"] = defaults["target_xirr_fund_annual_pct"]
+    st.session_state["fund_accrual_start_delay_days"] = defaults["accrual_start_delay_days"]
+    st.session_state["fund_total_term_days"] = defaults["total_term_days"]
     st.session_state["fund_benchmark_annual_pct"] = defaults["benchmark_annual_pct"]
     st.session_state["fund_benchmark_mode"] = defaults["benchmark_mode"]
     st.session_state["fund_cession_fee_pct"] = defaults["cession_fee_pct"]
@@ -3323,6 +3359,7 @@ def sync_doctor_widget_state_from_fund(defaults: dict[str, object]) -> None:
     st.session_state["doctor_request_date"] = defaults["advance_date"]
     st.session_state["doctor_hospital_payment_day"] = defaults["hospital_payment_day"]
     st.session_state["doctor_grace_days"] = defaults["grace_days"]
+    st.session_state["doctor_accrual_start_delay_days"] = defaults["accrual_start_delay_days"]
     st.session_state["doctor_monthly_rate_pct"] = defaults["monthly_rate_pct"]
     st.session_state["doctor_receivable_value"] = defaults["receivable_value"]
     st.session_state["doctor_advance_pct"] = defaults["advance_pct"]
@@ -3402,11 +3439,12 @@ def render_doctor_parameters(defaults: dict[str, object]) -> dict[str, object]:
         value=int(defaults["hospital_payment_day"]),
         key="doctor_hospital_payment_day",
     )
-    grace_days = 0
+    grace_days = int(defaults["grace_days"])
+    accrual_start_delay_days = int(defaults["accrual_start_delay_days"])
     st.markdown("**Regra de carência**")
     st.caption(
-        "A liquidação não ocorre no mesmo mês da antecipação. "
-        "O primeiro desconto será no pagamento hospitalar do mês seguinte."
+        f"O primeiro repasse elegível ocorre no primeiro pagamento hospitalar em ou após "
+        f"{grace_days} dias corridos da antecipação."
     )
     monthly_rate_pct = float(defaults["monthly_rate_pct"])
     operational_variable_pct = 0.0
@@ -3431,6 +3469,7 @@ def render_doctor_parameters(defaults: dict[str, object]) -> dict[str, object]:
         "request_date": request_date,
         "hospital_payment_day": int(hospital_payment_day),
         "grace_days": grace_days,
+        "accrual_start_delay_days": accrual_start_delay_days,
         "monthly_rate_pct": float(monthly_rate_pct),
         "operational_variable_pct": float(operational_variable_pct),
         "operational_fixed_cost": float(operational_fixed_cost),
@@ -3458,9 +3497,11 @@ def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[
     request_date = doctor_params["request_date"]
     hospital_payment_day = int(doctor_params["hospital_payment_day"])
     grace_days = int(doctor_params["grace_days"])
+    accrual_start_delay_days = int(doctor_params["accrual_start_delay_days"])
     monthly_rate_pct = float(doctor_params["monthly_rate_pct"])
     operational_variable_pct = float(doctor_params["operational_variable_pct"])
     operational_fixed_cost = float(doctor_params["operational_fixed_cost"])
+    operation_total_term_days = accrual_start_delay_days + DOCTOR_FIXED_TERM_DAYS
 
     if credit_limit < 1000:
         st.error("O limite de crédito disponível precisa ser de pelo menos R$ 1.000.")
@@ -3471,7 +3512,7 @@ def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[
             advance_date=request_date,
             hospital_payment_day=hospital_payment_day,
             grace_days=grace_days,
-            total_term_days=DOCTOR_FIXED_TERM_DAYS,
+            total_term_days=operation_total_term_days,
         )
         max_offer = calculate_doctor_offer(
             request_date=request_date,
@@ -3482,8 +3523,9 @@ def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[
             grace_days=grace_days,
             requested_value=float(credit_limit),
             installment_count=len(eligible_dates),
-            total_term_days=DOCTOR_FIXED_TERM_DAYS,
+            total_term_days=operation_total_term_days,
             vp_sensitive_to_advance_date=bool(defaults["vp_sensitive_to_advance_date"]),
+            accrual_start_delay_days=accrual_start_delay_days,
         )
     except ValueError as exc:
         st.error(str(exc))
@@ -3556,8 +3598,9 @@ def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[
             operational_fixed_cost=operational_fixed_cost,
             grace_days=grace_days,
             desired_net_value=float(requested_net_value),
-            total_term_days=DOCTOR_FIXED_TERM_DAYS,
+            total_term_days=operation_total_term_days,
             vp_sensitive_to_advance_date=bool(defaults["vp_sensitive_to_advance_date"]),
+            accrual_start_delay_days=accrual_start_delay_days,
         )
         doctor_projection = build_projection(
             advance_date=request_date,
@@ -3566,8 +3609,9 @@ def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[
             monthly_rate_pct=monthly_rate_pct,
             operational_variable_pct=operational_variable_pct,
             operational_fixed_cost=operational_fixed_cost,
-            total_term_days=DOCTOR_FIXED_TERM_DAYS,
+            total_term_days=operation_total_term_days,
             grace_days=grace_days,
+            accrual_start_delay_days=accrual_start_delay_days,
             dc_value=float(offer["requested_value"]),
             benchmark_annual_pct=float(defaults["benchmark_annual_pct"]),
             benchmark_mode=str(defaults["benchmark_mode"]),
@@ -3656,6 +3700,142 @@ def render_doctor_fund_mapping() -> None:
             unsafe_allow_html=True,
         )
     st.markdown("</div>", unsafe_allow_html=True)
+    render_doctor_api_notes()
+
+
+def render_api_field_list(title: str, fields: list[str]) -> None:
+    st.markdown(f"<strong>{title}</strong>", unsafe_allow_html=True)
+    for field in fields:
+        st.markdown(f"<div class='doctor-impact-item'>• {field}</div>", unsafe_allow_html=True)
+
+
+def render_api_field_table(title: str, rows: list[tuple[str, str]]) -> None:
+    st.markdown(f"<strong>{title}</strong>", unsafe_allow_html=True)
+    for field, description in rows:
+        st.markdown(
+            f"<div class='doctor-impact-item'>• <strong>{field}</strong>: {description}</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_doctor_api_notes() -> None:
+    st.markdown('<div class="doctor-impact-panel doctor-api-panel">', unsafe_allow_html=True)
+    st.markdown("<h3>APIs de integração</h3>", unsafe_allow_html=True)
+    st.caption("Campos conceituais para integrar a solicitação do médico com a análise operacional do fundo.")
+
+    with st.expander("API 1 · Solicitação de antecipação", expanded=False):
+        render_api_field_table(
+            "Entrada",
+            [
+                ("id_hospital", "identificador do hospital/calendário operacional usado para calcular os repasses."),
+                ("medico_cnpj", "identificador fiscal do médico ou da pessoa jurídica solicitante."),
+                ("data_antecipacao", "data do pedido e do desembolso previsto ao médico."),
+                (
+                    "valor_antecipacao_solicitado",
+                    "valor presente solicitado pelo médico; corresponde ao valor líquido a depositar hoje.",
+                ),
+                (
+                    "datas_vencimento_previstas",
+                    "lista dos repasses hospitalares elegíveis calculados pelo calendário do hospital.",
+                ),
+                (
+                    "prazo_total_operacao",
+                    "dias corridos entre a antecipação e a data limite da operação; no modelo atual = dias até accrual + 90.",
+                ),
+                (
+                    "carencia_dias_inicio_accrual_juros",
+                    "quantidade de dias corridos após a antecipação para iniciar accrual de juros/QMM.",
+                ),
+                (
+                    "carencia_dias_inicio_radar_cobranca",
+                    "quantidade de dias corridos usada para definir o primeiro repasse elegível e ativar o radar.",
+                ),
+            ],
+        )
+        render_api_field_table(
+            "Retorno",
+            [
+                ("status", "resultado do processamento da solicitação, por exemplo aprovado, pendente ou rejeitado."),
+                ("id_solicitacao", "identificador único da solicitação para rastreio entre Médico e Fundo."),
+                ("mensagem_processamento", "descrição curta do resultado ou inconsistência encontrada."),
+                (
+                    "cenario_base_fundo_atualizado",
+                    "indica se a solicitação foi gravada e sensibilizou a análise operacional do fundo.",
+                ),
+            ],
+        )
+
+    with st.expander("API 2 · Cálculo de valor presente e QMM", expanded=False):
+        render_api_field_table(
+            "Entrada",
+            [
+                ("id_hospital", "identificador do hospital para buscar a regra de pagamento e calendário operacional."),
+                ("medico_cnpj", "identificador do médico usado para buscar limite, elegibilidade e políticas de crédito."),
+                ("data_antecipacao", "data base para cálculo de prazo, VP, QMM e repasses elegíveis."),
+                (
+                    "carencia_dias_inicio_accrual_juros",
+                    "dias corridos usados para calcular data_inicio_accrual = data_antecipacao + carência.",
+                ),
+                (
+                    "carencia_dias_inicio_radar_cobranca",
+                    "dias corridos usados para excluir repasses antes da carência e definir o primeiro radar elegível.",
+                ),
+                (
+                    "valor_limite_credito_medico",
+                    "limite máximo elegível para antecipação, calculado a partir do recebível e percentual antecipável.",
+                ),
+                (
+                    "datas_vencimento_previstas",
+                    "primeiro, segundo e terceiro repasses elegíveis dentro da data limite da operação.",
+                ),
+            ],
+        )
+        render_api_field_table(
+            "Retorno",
+            [
+                (
+                    "valor_presente_antecipacao",
+                    "valor líquido a depositar ao médico, calculado pelo VP do DC conforme política da operação.",
+                ),
+                (
+                    "valor_qmm_primeiro_repasse_elegivel",
+                    "valor econômico de referência/QMM aplicável no primeiro repasse elegível.",
+                ),
+                (
+                    "valor_qmm_segundo_repasse_elegivel",
+                    "valor econômico de referência/QMM aplicável no segundo repasse elegível.",
+                ),
+                (
+                    "valor_qmm_terceiro_repasse_elegivel",
+                    "valor econômico de referência/QMM aplicável no terceiro repasse elegível.",
+                ),
+            ],
+        )
+
+    with st.expander("API 3 · Extrato preliminar do lastro", expanded=False):
+        st.caption("Integração para enviar ao fundo os recebíveis que compõem o lastro potencial da antecipação.")
+        render_api_field_table(
+            "Entrada",
+            [
+                ("id_hospital", "identificador do hospital responsável pelo repasse do recebível."),
+                ("medico_cnpj", "CNPJ do médico ou da pessoa jurídica titular do recebível."),
+                ("id_atendimento", "identificador único do atendimento que originou o recebível médico."),
+                ("codigo_procedimento", "código do procedimento realizado, usado para rastreabilidade clínica/operacional."),
+                ("valor_a_receber", "valor bruto do recebível associado ao atendimento/procedimento."),
+                (
+                    "valor_limite_antecipacao",
+                    "valor máximo antecipável sobre o recebível, após aplicação da política de elegibilidade/haircut.",
+                ),
+            ],
+        )
+        render_api_field_table(
+            "Retorno",
+            [
+                ("status", "indica se o PDF do extrato preliminar foi gerado com sucesso ou se houve falha."),
+                ("mensagem_processamento", "descrição curta do sucesso ou do erro encontrado na geração do PDF."),
+            ],
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_version_selector() -> None:
@@ -3730,19 +3910,35 @@ def main() -> None:
             step=1,
             key="fund_radar_business_days",
         )
+        grace_days = st.number_input(
+            "Carência para primeiro repasse elegível (dias corridos)",
+            min_value=0,
+            max_value=180,
+            value=int(defaults["grace_days"]),
+            step=1,
+            key="fund_grace_days",
+        )
+        accrual_start_delay_days = st.number_input(
+            "Início do accrual após a antecipação (dias corridos)",
+            min_value=0,
+            max_value=180,
+            value=int(defaults["accrual_start_delay_days"]),
+            step=1,
+            key="fund_accrual_start_delay_days",
+        )
         operation_mode = "Por prazo total"
-        total_term_days_input = DOCTOR_FIXED_TERM_DAYS
-        st.caption(f"Prazo total da operação: {DOCTOR_FIXED_TERM_DAYS} dias corridos, premissa fixa do modelo.")
+        total_term_days_input = int(accrual_start_delay_days) + DOCTOR_FIXED_TERM_DAYS
+        st.caption(
+            f"Prazo total da operação: {int(accrual_start_delay_days)} dias até o accrual "
+            f"+ {DOCTOR_FIXED_TERM_DAYS} dias de accrual = {total_term_days_input} dias corridos."
+        )
         installment_count_input = None
-        operation_limit_date = hospital_payment_on_or_after(
-            advance_date + timedelta(days=int(total_term_days_input)),
-            int(hospital_payment_day),
+        operation_limit_date = advance_date + timedelta(days=int(total_term_days_input))
+        operation_accrual_start_preview = calculate_accrual_start_date_from_delay(
+            advance_date,
+            int(accrual_start_delay_days),
         )
-        operation_accrual_start_preview = calculate_accrual_start_date_from_final(
-            operation_limit_date,
-            int(total_term_days_input),
-        )
-        st.caption(f"Data de vencimento prevista: {format_date_pt(operation_limit_date)}.")
+        st.caption(f"Data limite da operação: {format_date_pt(operation_limit_date)}.")
         st.caption(f"Data de início do accrual: {format_date_pt(operation_accrual_start_preview)}.")
         vp_sensitive_to_advance_date = st.toggle(
             "VP sensível à data da antecipação",
@@ -3761,7 +3957,7 @@ def main() -> None:
             preview_dates = calculate_installment_dates_by_term(
                 advance_date=advance_date,
                 hospital_payment_day=int(hospital_payment_day),
-                grace_days=int(defaults["grace_days"]),
+                grace_days=int(grace_days),
                 total_term_days=int(total_term_days_input),
             )
             st.caption(
@@ -3874,11 +4070,10 @@ def main() -> None:
             step=1.0,
             key="fund_performance_fee_pct",
         )
-        grace_days = 0
         st.markdown("**Regra de carência**")
         st.caption(
-            "A liquidação não ocorre no mesmo mês da antecipação. "
-            "O primeiro pagamento elegível é o pagamento hospitalar do mês seguinte."
+            f"O primeiro repasse elegível é o primeiro pagamento hospitalar em ou após "
+            f"{int(grace_days)} dias corridos da antecipação."
         )
         st.header("Inputs de pós-vencimento")
         late_monthly_rate_pct = st.number_input(
@@ -3933,6 +4128,7 @@ def main() -> None:
             installment_amount=float(installment_amount) if installment_amount is not None else None,
             pricing_policy=str(pricing_policy),
             target_xirr_fund_annual_pct=float(target_xirr_fund_annual_pct),
+            accrual_start_delay_days=int(accrual_start_delay_days),
         )
     except ValueError as exc:
         st.error(str(exc))
@@ -3971,10 +4167,10 @@ def main() -> None:
     with st.sidebar:
         st.divider()
         st.subheader("Resultado do calendário")
-        st.metric("Prazo total da operação", f"{int(projection['input_total_term_days'])} dias")
-        st.caption(f"Data limite da operação: {format_date_pt(projection['contractual_final_date'])}")
+        st.metric("Prazo limite da operação", f"{int(projection['input_total_term_days'])} dias")
+        st.caption(f"Data limite da operação: {format_date_pt(projection['operation_limit_date'])}")
+        st.caption(f"Prazo efetivo até última liquidação: {int(projection['real_total_term_days'])} dias")
         st.metric("Repasses elegíveis", installment_count)
-        st.caption(f"Valor nominal por repasse: {format_brl(installment_amount)}")
         st.caption(f"Última liquidação prevista: {format_date_pt(projection['final_date'])}")
         if projection["pricing_policy"] == PRICING_POLICY_TARGET_XIRR:
             st.caption(
