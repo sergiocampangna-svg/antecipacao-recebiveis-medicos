@@ -774,7 +774,7 @@ def build_fund_economic_curves(
             benchmark = present_value
         else:
             cobranca_financeira = present_value * ((1 + annual_operation_rate) ** (elapsed_du / 252))
-            if current.weekday() < 5:
+            if is_business_day(current, PARAMETRIZED_HOLIDAYS):
                 if benchmark_mode == "Avançado" and benchmark_rates:
                     last_benchmark_rate = benchmark_rates.get(current, last_benchmark_rate)
                 benchmark_value *= (1 + last_benchmark_rate) ** (1 / 252)
@@ -798,14 +798,14 @@ def build_fund_economic_curves(
                 "benchmark_rate_annual": last_benchmark_rate,
                 "dc_economico": dc_economico,
                 "spread_bruto": spread,
-                "cessao_fidc": cession_cost if current >= first_date else 0.0,
+                "cessao_fidc": cession_cost if current == first_date else 0.0,
                 "fee_performance": fee_performance,
                 "curva_liquida_fidc": curva_liquida,
             }
         )
 
     df = pd.DataFrame(rows)
-    final_row = df.iloc[-1]
+    final_row = df.loc[df["date"] == final_date].iloc[-1]
     final_liquid_value = float(final_row["curva_liquida_fidc"])
     gross_cash_flows = [(advance_date, -present_value), (final_date, dc_value)]
     fund_cash_flows = [(advance_date, -(present_value + cession_cost)), (final_date, final_liquid_value)]
@@ -1497,12 +1497,15 @@ def build_projection(
     # entre os repasses elegíveis. Não há parametrização manual de parcelas.
     installment_amount = dc_value / calculated_installment_count
 
-    final_date = max(installment_dates)
+    last_liquidation_date = max(installment_dates)
     operation_limit_date = (
         advance_date + timedelta(days=total_term_days)
         if operation_mode == "Por prazo total" and total_term_days is not None
-        else final_date
+        else last_liquidation_date
     )
+    # A data limite é o vencimento jurídico/econômico da operação. Os repasses
+    # elegíveis são apenas marcos operacionais de liquidação antes desse limite.
+    final_date = operation_limit_date
     grace_end = first_installment_cycle_date(advance_date, hospital_payment_day, grace_days)
 
     if pricing_policy == PRICING_POLICY_TARGET_XIRR:
@@ -1575,7 +1578,7 @@ def build_projection(
             "Os custos da operação tornam o valor líquido menor ou igual a zero. "
             "Reduza os custos operacionais ou a taxa de juros."
         )
-    payment_dates = calculate_payment_dates(min(installment_dates), final_date, hospital_payment_day)
+    payment_dates = installment_dates
     radars = calculate_radar_windows(
         payment_dates,
         advance_date,
@@ -1624,8 +1627,9 @@ def build_projection(
     spread_base = df["cobranca_financeira"].where(df["date"] <= final_date, df["dc_economico"])
     df["spread_bruto"] = spread_base - df["benchmark"]
     df["fee_performance"] = df["spread_bruto"].clip(lower=0) * (performance_fee_pct / 100)
-    df["curva_liquida_fidc"] = df["cobranca_financeira"] - df["cessao_fidc"] - df["fee_performance"]
-    final_fund_row = df.iloc[-1]
+    cession_cost = float(fund_metrics["cession_cost"])
+    df["curva_liquida_fidc"] = df["cobranca_financeira"] - cession_cost - df["fee_performance"]
+    final_fund_row = df.loc[df["date"] == final_date].iloc[-1]
     fund_metrics.update(
         {
             "spread_bruto_final": float(final_fund_row["spread_bruto"]),
@@ -1672,6 +1676,7 @@ def build_projection(
         "radars": radars,
         "final_date": final_date,
         "contractual_final_date": contractual_final_date,
+        "last_liquidation_date": last_liquidation_date,
         "operation_limit_date": operation_limit_date,
         "input_total_term_days": input_total_term_days,
         "real_total_term_days": real_total_term_days,
@@ -2085,9 +2090,9 @@ def render_operation_summary(
         ("Dias até início do accrual", f"{int(projection['accrual_start_delay_days'])} dias corridos"),
         ("Carência do primeiro repasse", f"{int(projection['grace_days'])} dias corridos"),
         ("Prazo limite da operação", f"{int(projection['input_total_term_days'])} dias"),
-        ("Data limite da operação", format_date_pt(projection["operation_limit_date"])),
+        ("Data limite / vencimento econômico", format_date_pt(projection["operation_limit_date"])),
         ("Prazo efetivo até liquidação", f"{int(projection['real_total_term_days'])} dias"),
-        ("Última liquidação prevista", format_date_pt(projection["final_date"])),
+        ("Última liquidação operacional prevista", format_date_pt(projection["last_liquidation_date"])),
         ("Valor bruto a receber", format_brl(float(projection["receivable_value"]))),
         ("Percentual antecipável", format_pct(float(projection["advance_pct"]))),
         ("Limite de crédito / DC", format_brl(dc_value)),
@@ -2125,7 +2130,8 @@ def render_fund_technical_notes(projection: dict[str, object]) -> None:
     notes = [
         "A curva de cobrança representa o valor aplicável de cobrança, considerando o QMM quando houver radar ativo.",
         "O QMM funciona como piso econômico de referência nas janelas de radar.",
-        "A Curva DC representa o saldo econômico/contratual e pode incorporar multa e mora no pós-vencimento.",
+        "A Curva DC representa o saldo econômico/contratual e pode incorporar multa e mora após a data limite da operação.",
+        "A data limite da operação é o vencimento jurídico/econômico usado no VP e na XIRR; a última liquidação prevista é apenas o último repasse operacional antes desse vencimento.",
         f"Benchmark Selic/CDI: {benchmark_label}.",
         f"XIRR bruta estimada: {format_optional_pct(projection.get('xirr_gross_annual'))} a.a.",
         f"XIRR líquida FIDC estimada: {format_optional_pct(projection.get('xirr_fund_annual'))} a.a.",
@@ -2161,7 +2167,7 @@ def render_calculation_details(projection: dict[str, object]) -> None:
             </div>
             <div class="formula-box">
                 <strong>Cessão FIDC</strong><br>
-                CessaoFIDC = TaxaCessao x VP
+                CessaoFIDC inicial = TaxaCessao x VP
             </div>
             <div class="formula-box">
                 <strong>Fee de performance</strong><br>
@@ -2195,7 +2201,7 @@ def render_calculation_details(projection: dict[str, object]) -> None:
                 "O VP é calculado a partir do início do accrual; a data da antecipação só impacta o VP se alterar essa base ou o vencimento."
             )
         st.caption(
-            f"Data de vencimento/última liquidação prevista: {format_date_pt(projection['final_date'])}."
+            f"Data limite / vencimento econômico usada no VP e na XIRR: {format_date_pt(projection['final_date'])}."
         )
 
 
@@ -2242,8 +2248,13 @@ def build_executive_milestones(advance_date: date, projection: dict[str, object]
         },
         {
             "Data": format_date_pt(projection["final_date"]),
-            "Marco": "Última liquidação prevista",
-            "Comentário": "Último repasse elegível dentro do horizonte da operação.",
+            "Marco": "Vencimento econômico",
+            "Comentário": "Data limite jurídica/econômica da operação, usada no VP e na XIRR.",
+        },
+        {
+            "Data": format_date_pt(projection["last_liquidation_date"]),
+            "Marco": "Última liquidação operacional prevista",
+            "Comentário": "Último repasse hospitalar elegível antes da data limite da operação.",
         },
         {
             "Data": format_date_pt(first_post_maturity),
@@ -2266,8 +2277,8 @@ def render_assumptions(
     installment_count = int(projection["calculated_installment_count"])
     installment_amount = float(projection["installment_amount"])
     input_total_term_days = projection["input_total_term_days"]
-    contractual_final_date = projection["contractual_final_date"]
     final_date = projection["final_date"]
+    last_liquidation_date = projection["last_liquidation_date"]
     liquidation = projection.get("liquidation", {})
 
     st.subheader("Premissas")
@@ -2280,11 +2291,11 @@ def render_assumptions(
         ("Percentual antecipável", format_pct(float(projection["advance_pct"]))),
         ("Limite de crédito calculado", format_brl(calculate_credit_limit(float(projection["receivable_value"]), float(projection["advance_pct"])))),
         ("DC / valor de face da operação", format_brl(dc_value)),
-        ("Parcelas do médico", f"{installment_count} x {format_brl(installment_amount)}"),
+        ("Repasses elegíveis", str(installment_count)),
         ("Prazo limite da operação", f"{int(input_total_term_days)} dias corridos"),
-        ("Data limite da operação", format_date_pt(projection["operation_limit_date"])),
+        ("Data limite / vencimento econômico", format_date_pt(projection["operation_limit_date"])),
         ("Prazo efetivo até liquidação", f"{int(projection['real_total_term_days'])} dias corridos"),
-        ("Última liquidação prevista", format_date_pt(final_date)),
+        ("Última liquidação operacional prevista", format_date_pt(last_liquidation_date)),
         ("Carência do primeiro repasse", f"{int(projection['grace_days'])} dias corridos"),
         ("Dias até início do accrual", f"{int(projection['accrual_start_delay_days'])} dias corridos"),
         ("Início do accrual QMM", format_date_pt(projection["accrual_start_date"])),
@@ -2313,7 +2324,7 @@ def render_assumptions(
             ", ".join(format_date_pt(item) for item in period_holidays) if period_holidays else "-",
         )
     )
-    rows.insert(8, ("Parcelas calculadas", str(installment_count)))
+    rows.insert(8, ("Marcos de liquidação calculados", str(installment_count)))
     if liquidation:
         rows.extend(
             [
@@ -2383,12 +2394,12 @@ def render_parameters(
         "Benchmark simplificado: Benchmark_t = Benchmark_(t-1) x (1 + i_a,bench)^(1/252)",
         "Benchmark avançado: usa a taxa informada por data e carrega a última taxa disponível nos dias úteis seguintes",
         "Spread = curva de cobrança ou curva DC - benchmark",
-        "Cessão FIDC = taxa de cessão x VP",
+        "Cessão FIDC inicial = taxa de cessão x VP",
         "Fee de performance = spread x percentual de performance",
-        "Curva líquida FIDC = curva de cobrança - cessão - fee de performance",
+        "Curva líquida FIDC = curva de cobrança - custo inicial de cessão - fee de performance",
         "XIRR: soma(CF_i / (1 + r)^((d_i - d_0) / 365)) = 0",
-        "XIRR bruta: saída no VP creditado e entrada no DC na última liquidação",
-        "XIRR líquida: saída no VP + cessão FIDC e entrada na curva líquida estimada",
+        "XIRR bruta: saída no VP creditado e entrada no DC na data limite / vencimento econômico",
+        "XIRR líquida: saída inicial no VP + cessão FIDC e entrada na curva líquida estimada",
     ]
     for formula in formula_rows:
         st.caption(formula)
@@ -2396,19 +2407,19 @@ def render_parameters(
 
     st.caption(
         "Regra do modelo: o prazo total da operação limita os ciclos mensais do hospital; "
-        f"a quantidade calculada é {projection['calculated_installment_count']} parcelas."
+        f"a quantidade calculada é {projection['calculated_installment_count']} repasses elegíveis."
     )
     st.caption(
-        f"Data limite da operação: {format_date_pt(projection['operation_limit_date'])}. "
-        f"Última liquidação prevista: {format_date_pt(projection['final_date'])}. "
+        f"Data limite / vencimento econômico: {format_date_pt(projection['operation_limit_date'])}. "
+        f"Última liquidação operacional prevista: {format_date_pt(projection['last_liquidation_date'])}. "
         f"Prazo efetivo até liquidação: {int(projection['real_total_term_days'])} dias."
     )
 
-    st.markdown("**Datas das parcelas**")
+    st.markdown("**Repasses elegíveis / marcos de liquidação**")
     st.caption("A primeira liquidação elegível ocorre no primeiro pagamento hospitalar em ou após a carência configurada; as demais seguem mensalmente.")
     for item in installments:
         st.caption(
-            f"Parcela {item.number}: {format_date_pt(item.due_date)} | "
+            f"Repasse {item.number}: {format_date_pt(item.due_date)} | "
             f"{item.days_from_advance} dias | VP {format_brl(item.present_value)}"
         )
 
@@ -2525,7 +2536,7 @@ def build_timeline_comments(
         rows.append(
             {
                 "Data": format_date_pt(item.due_date),
-                "Marco": f"Vencimento da parcela {item.number}",
+                "Marco": f"Repasse elegível {item.number}",
                 "Comentário": payment_comment,
             }
         )
@@ -2556,7 +2567,7 @@ def build_fund_economic_comments(projection: dict[str, object]) -> pd.DataFrame:
         },
         {
             "Tema": "FIDC",
-            "Comentário": "Custo de cessão e fee de performance reduzem a curva líquida estimada do fundo.",
+            "Comentário": "O custo inicial de cessão e a fee de performance reduzem a curva líquida estimada do fundo.",
         },
         {
             "Tema": "XIRR / TIRR",
@@ -3087,7 +3098,7 @@ def calculate_doctor_offer(
         installment_count=installment_count,
     )
     installment_amount = requested_value / installment_count
-    final_date = max(installment_dates)
+    final_date = request_date + timedelta(days=total_term_days) if total_term_days is not None else max(installment_dates)
     accrual_start_date = calculate_accrual_start_date_from_delay(request_date, accrual_start_delay_days)
     financial_present_value, installments = calculate_present_value(
         request_date,
@@ -3149,7 +3160,7 @@ def calculate_gross_value_from_net_disbursement(
 
     monthly_rate = monthly_rate_pct / 100
     annual_rate = calcular_taxa_anual_equivalente(monthly_rate)
-    final_date = max(installment_dates)
+    final_date = request_date + timedelta(days=total_term_days) if total_term_days is not None else max(installment_dates)
     accrual_start_date = calculate_accrual_start_date_from_delay(request_date, accrual_start_delay_days)
     vp_start_date = request_date if vp_sensitive_to_advance_date else accrual_start_date
     business_days = contar_dias_uteis(vp_start_date, final_date, PARAMETRIZED_HOLIDAYS)
@@ -3951,7 +3962,7 @@ def main() -> None:
             advance_date,
             int(accrual_start_delay_days),
         )
-        st.caption(f"Data limite da operação: {format_date_pt(operation_limit_date)}.")
+        st.caption(f"Data limite / vencimento econômico: {format_date_pt(operation_limit_date)}.")
         st.caption(f"Data de início do accrual: {format_date_pt(operation_accrual_start_preview)}.")
         vp_sensitive_to_advance_date = st.toggle(
             "VP sensível à data da antecipação",
@@ -3974,11 +3985,11 @@ def main() -> None:
                 total_term_days=int(total_term_days_input),
             )
             st.caption(
-                "Última liquidação prevista pelo calendário do hospital: "
+                "Última liquidação operacional prevista pelo calendário do hospital: "
                 f"{format_date_pt(max(preview_dates))}."
             )
         except ValueError:
-            st.caption("Última liquidação prevista: sem vencimento elegível dentro do prazo informado.")
+            st.caption("Última liquidação operacional prevista: sem repasse elegível dentro do prazo informado.")
 
         st.header("Inputs econômicos da operação")
         receivable_value = st.number_input(
@@ -4169,8 +4180,8 @@ def main() -> None:
     st.session_state["fund_calculated_installment_count"] = installment_count
     if installment_count > 4:
         st.error(
-            "A operação calculada possui mais de 4 parcelas. "
-            "A Área do Médico permite no máximo 4 parcelas; reduza o prazo total."
+            "A operação calculada possui mais de 4 repasses elegíveis. "
+            "A Área do Médico permite no máximo 4 repasses; reduza o prazo total."
         )
         st.stop()
     installment_amount = float(projection["installment_amount"])
@@ -4181,10 +4192,10 @@ def main() -> None:
         st.divider()
         st.subheader("Resultado do calendário")
         st.metric("Prazo limite da operação", f"{int(projection['input_total_term_days'])} dias")
-        st.caption(f"Data limite da operação: {format_date_pt(projection['operation_limit_date'])}")
+        st.caption(f"Data limite / vencimento econômico: {format_date_pt(projection['operation_limit_date'])}")
         st.caption(f"Prazo efetivo até última liquidação: {int(projection['real_total_term_days'])} dias")
         st.metric("Repasses elegíveis", installment_count)
-        st.caption(f"Última liquidação prevista: {format_date_pt(projection['final_date'])}")
+        st.caption(f"Última liquidação operacional prevista: {format_date_pt(projection['last_liquidation_date'])}")
         if projection["pricing_policy"] == PRICING_POLICY_TARGET_XIRR:
             st.caption(
                 "Taxa mensal calculada pela XIRR alvo: "
@@ -4214,11 +4225,11 @@ def main() -> None:
         with metric_cols_2[1]:
             render_metric_card("Fee performance", format_brl(performance_fee_final), "sobre spread")
         with metric_cols_2[2]:
-            render_metric_card("Curva líquida FIDC", format_brl(fidc_liquid_curve_final), "valor final estimado")
+            render_metric_card("Curva líquida FIDC", format_brl(fidc_liquid_curve_final), "após cessão inicial")
         with metric_cols_2[3]:
-            render_metric_card("XIRR líquida", format_optional_pct(xirr_fund_annual), "fluxo líquido FIDC")
+            render_metric_card("XIRR líquida", format_optional_pct(xirr_fund_annual), "VP + cessão inicial")
         with metric_cols_2[4]:
-            render_metric_card("Última liquidação", format_date_pt(projection["final_date"]), "calendário hospitalar")
+            render_metric_card("Vencimento econômico", format_date_pt(projection["final_date"]), "data limite da operação")
 
         chart_col, side_col = st.columns([2.45, 1], gap="large")
         with chart_col:
