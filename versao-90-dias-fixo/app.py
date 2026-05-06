@@ -197,10 +197,23 @@ def excel_workday(value: date, business_days: int, holidays: set[date] | None = 
 
 
 def month_payment_date(reference: date, hospital_payment_day: int) -> date:
-    # A planilha de referência trata a remuneração do hospital como "nº dia útil"
-    # usando a convenção WORKDAY(EOMONTH(mês,-1)-1, n, feriados).
-    month_start = date(reference.year, reference.month, 1)
-    return excel_workday(month_start - timedelta(days=2), hospital_payment_day, PARAMETRIZED_HOLIDAYS)
+    # Regra operacional: "nº dia útil" significa o enésimo dia útil dentro do
+    # próprio mês de referência, excluindo finais de semana e feriados.
+    target_business_day = max(int(hospital_payment_day), 1)
+    current = date(reference.year, reference.month, 1)
+    month_end = date(reference.year, reference.month, monthrange(reference.year, reference.month)[1])
+    business_day_count = 0
+    last_business_day = current
+
+    while current <= month_end:
+        if is_business_day(current, PARAMETRIZED_HOLIDAYS):
+            business_day_count += 1
+            last_business_day = current
+            if business_day_count == target_business_day:
+                return current
+        current += timedelta(days=1)
+
+    return last_business_day
 
 
 def next_hospital_payment_date(reference: date, hospital_payment_day: int) -> date:
