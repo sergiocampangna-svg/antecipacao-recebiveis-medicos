@@ -16,7 +16,7 @@ COBRANCA_COLOR = "#f28c28"
 DC_COLOR = "#111111"
 RADAR_COLOR = "rgba(33, 94, 150, 0.13)"
 GRID_COLOR = "#e8edf3"
-DOCTOR_FIXED_TERM_DAYS = 90
+DEFAULT_FIXED_TERM_DAYS = 90
 DEFAULT_GRACE_DAYS = 30
 DEFAULT_ACCRUAL_START_DELAY_DAYS = 30
 FIXED_GRACE_RULE_DESCRIPTION = "primeiro pagamento hospitalar elegível após a carência configurada"
@@ -29,6 +29,7 @@ DEFAULT_BENCHMARK_ANNUAL_PCT = 14.75
 DEFAULT_BENCHMARK_MODE = "Avançado"
 DEFAULT_CESSION_FEE_PCT = 0.10
 DEFAULT_PERFORMANCE_FEE_PCT = 10.0
+DEFAULT_VP_SENSITIVE_TO_ADVANCE_DATE = True
 PRICING_POLICY_RATE = "Taxa de antecipação informada"
 PRICING_POLICY_TARGET_XIRR = "XIRR alvo do fundo"
 DEFAULT_TARGET_XIRR_FUND_ANNUAL_PCT = 60.0
@@ -1493,8 +1494,8 @@ def build_projection(
     else:
         raise ValueError("Selecione um modo de definição da operação.")
 
-    # Na versão de 90 dias fixos o DC é sempre distribuído automaticamente
-    # entre os repasses elegíveis. Não há parametrização manual de parcelas.
+    # Nesta versão, o DC é distribuído automaticamente entre os repasses
+    # elegíveis. Não há parametrização manual de parcelas.
     installment_amount = dc_value / calculated_installment_count
 
     last_liquidation_date = max(installment_dates)
@@ -2457,6 +2458,220 @@ def render_concepts_panel() -> None:
         st.caption(f"**{label}:** {description}")
 
 
+def build_concept_assistant_answers(projection: dict[str, object]) -> list[tuple[tuple[str, ...], str]]:
+    vp_base = "data da antecipação" if projection["vp_sensitive_to_advance_date"] else "data de início do accrual"
+    return [
+        (
+            ("valor presente", "vp", "valor creditado"),
+            (
+                "O valor presente é o valor líquido projetado para crédito ao médico hoje. "
+                "Ele é calculado descontando o DC/valor de face pela taxa anual equivalente da antecipação, "
+                f"usando dias úteis entre a {vp_base} e o vencimento econômico. "
+                f"Nesta simulação, a base do VP é {format_date_pt(projection['vp_start_date'])}, "
+                f"o vencimento econômico é {format_date_pt(projection['vp_end_date'])} e o DU usado é "
+                f"{int(projection['vp_business_days'])} dias úteis."
+            ),
+        ),
+        (
+            ("dc", "direito creditório", "valor de face"),
+            (
+                "O DC/valor de face é o valor nominal do ativo cedido ao fundo. "
+                "Nesta versão, o DC máximo coincide com o limite de crédito calculado: "
+                "valor bruto a receber multiplicado pelo percentual antecipável."
+            ),
+        ),
+        (
+            ("qmm", "piso", "valor qmm"),
+            (
+                "O QMM é o piso de cobrança da operação. A Curva de Cobrança usa o maior valor entre a curva econômica "
+                "e o QMM, sempre limitado ao DC antes do pós-vencimento. No radar, o QMM assume o valor futuro projetado "
+                "até o fim da janela de radar."
+            ),
+        ),
+        (
+            ("radar", "janela"),
+            (
+                "O radar é uma janela em dias úteis ao redor de cada repasse elegível. "
+                f"Nesta simulação, a janela é de {int(projection['radar_business_days'])} dias úteis antes e depois. "
+                "No primeiro dia do radar, o QMM assume o valor futuro projetado até o fim da janela e permanece flat."
+            ),
+        ),
+        (
+            ("curva de cobrança", "cobrança"),
+            (
+                "A Curva de Cobrança representa o valor aplicável de cobrança da operação, não um parcelamento simples. "
+                "Como o QMM é piso de cobrança, a fórmula conceitual é: "
+                "Curva de Cobrança = min(max(curva econômica, QMM), DC)."
+            ),
+        ),
+        (
+            ("curva dc", "pós-vencimento", "multa", "mora"),
+            (
+                "A Curva DC representa o saldo econômico/contratual. Até o vencimento econômico, ela fica limitada ao DC. "
+                "Após a data limite da operação, pode incorporar multa e juros moratórios conforme os parâmetros de pós-vencimento."
+            ),
+        ),
+        (
+            ("data limite", "vencimento econômico", "última liquidação"),
+            (
+                "A data limite é o vencimento jurídico/econômico da operação e é usada no VP e na XIRR. "
+                "A última liquidação operacional prevista é apenas o último repasse hospitalar elegível antes dessa data. "
+                f"Nesta simulação, o vencimento econômico é {format_date_pt(projection['final_date'])} e a última liquidação "
+                f"operacional prevista é {format_date_pt(projection['last_liquidation_date'])}."
+            ),
+        ),
+        (
+            ("prazo", "90", "prazo econômico", "dias corridos"),
+            (
+                "O prazo total da operação é calculado em dias corridos: dias até início do accrual + prazo econômico configurado. "
+                f"Nesta simulação: {int(projection['accrual_start_delay_days'])} dias até o accrual + "
+                f"{int(projection['input_total_term_days']) - int(projection['accrual_start_delay_days'])} dias de prazo econômico "
+                f"= {int(projection['input_total_term_days'])} dias corridos."
+            ),
+        ),
+        (
+            ("calendário", "feriado", "dias úteis", "dias corridos"),
+            (
+                "Carência, início do accrual, prazo econômico e data limite usam dias corridos. "
+                "VP, accrual das curvas, Selic/benchmark, repasses hospitalares e radar usam dias úteis, excluindo feriados parametrizados."
+            ),
+        ),
+        (
+            ("selic", "benchmark"),
+            (
+                "A Selic/CDI é o benchmark econômico da operação. Ela acumula em dias úteis, excluindo feriados parametrizados, "
+                "e é usada para comparar a operação com uma referência de mercado."
+            ),
+        ),
+        (
+            ("spread",),
+            (
+                "O spread é a diferença entre o valor econômico da operação e o benchmark. "
+                "Antes do vencimento usa a Curva de Cobrança; após o vencimento usa a Curva DC."
+            ),
+        ),
+        (
+            ("fee", "performance"),
+            (
+                "A fee de performance é calculada como um percentual do spread positivo. "
+                "Conceitualmente: Fee de Performance = max(spread, 0) x percentual de performance."
+            ),
+        ),
+        (
+            ("cessão", "fidc"),
+            (
+                "A cessão FIDC é um custo inicial calculado sobre o VP. "
+                "Na curva líquida, esse custo inicial fica deduzido da visão econômica do fundo; na memória diária, aparece como fluxo inicial."
+            ),
+        ),
+        (
+            ("xirr", "tirr", "retorno"),
+            (
+                "A XIRR/TIRR mede o retorno implícito com datas reais. "
+                "A XIRR bruta usa saída no VP e entrada no DC no vencimento econômico. "
+                "A XIRR líquida considera a saída inicial de VP + cessão FIDC e entrada na curva líquida estimada."
+            ),
+        ),
+        (
+            ("api", "integração", "qmm por repasse"),
+            (
+                "Para calcular QMM por repasse fora da aplicação, a FIN-X precisa replicar as mesmas premissas: taxa contratada, "
+                "data de antecipação, início do accrual, vencimento econômico, DC, calendário hospitalar, feriados, janela de radar e cap no DC."
+            ),
+        ),
+    ]
+
+
+def answer_concept_question(question: str, projection: dict[str, object]) -> str:
+    normalized_question = normalize("NFKD", question.lower()).encode("ascii", "ignore").decode("ascii")
+    for keywords, answer in build_concept_assistant_answers(projection):
+        normalized_keywords = [
+            normalize("NFKD", keyword.lower()).encode("ascii", "ignore").decode("ascii")
+            for keyword in keywords
+        ]
+        if any(keyword in normalized_question for keyword in normalized_keywords):
+            return answer
+    return (
+        "Não encontrei esse conceito na base local do assistente. Tente perguntar sobre VP, QMM, radar, curva de cobrança, "
+        "Curva DC, Selic/benchmark, spread, fee de performance, cessão FIDC, XIRR, prazo, calendário ou APIs."
+    )
+
+
+def render_concept_assistant_controls(projection: dict[str, object], key_prefix: str = "concept_assistant") -> None:
+    st.caption("Pergunte sobre o racional de cálculo ou o conceito das principais informações da aplicação.")
+    suggestions = [
+        "Como é calculado o VP?",
+        "O que é QMM?",
+        "Qual a diferença entre data limite e última liquidação?",
+        "Como funciona o radar?",
+        "Como é calculada a XIRR?",
+    ]
+    quick_cols = st.columns(len(suggestions))
+    for index, suggestion in enumerate(suggestions):
+        with quick_cols[index]:
+            if st.button(suggestion, key=f"{key_prefix}_quick_{index}", use_container_width=True):
+                st.session_state[f"{key_prefix}_active_question"] = suggestion
+
+    typed_question = st.text_input(
+        "Digite sua pergunta",
+        placeholder="Ex.: Como é calculado o QMM no radar?",
+        key=f"{key_prefix}_question",
+    )
+    active_question = typed_question.strip() or st.session_state.get(f"{key_prefix}_active_question", "").strip()
+    if active_question:
+        st.markdown(
+            f"<div class='formula-box'>{answer_concept_question(active_question, projection)}</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_concept_assistant(projection: dict[str, object]) -> None:
+    with st.expander("Assistente de conceitos", expanded=False):
+        render_concept_assistant_controls(projection)
+
+
+def render_concept_assistant_page(defaults: dict[str, object]) -> None:
+    credit_limit = calculate_credit_limit(float(defaults["receivable_value"]), float(defaults["advance_pct"]))
+    dc_value = min(float(defaults.get("dc_value", credit_limit)), credit_limit)
+    benchmark_table = (
+        normalize_benchmark_table(st.session_state.get("fund_benchmark_table"))
+        if str(defaults["benchmark_mode"]) == "Avançado"
+        else None
+    )
+    try:
+        projection = build_projection(
+            advance_date=defaults["advance_date"],
+            hospital_payment_day=int(defaults["hospital_payment_day"]),
+            operation_mode="Por prazo total",
+            monthly_rate_pct=float(defaults["monthly_rate_pct"]),
+            benchmark_annual_pct=float(defaults["benchmark_annual_pct"]),
+            benchmark_mode=str(defaults["benchmark_mode"]),
+            benchmark_table=benchmark_table,
+            cession_fee_pct=float(defaults["cession_fee_pct"]),
+            performance_fee_pct=float(defaults["performance_fee_pct"]),
+            receivable_value=float(defaults["receivable_value"]),
+            advance_pct=float(defaults["advance_pct"]),
+            radar_business_days=int(defaults["radar_business_days"]),
+            late_monthly_rate_pct=float(defaults["late_monthly_rate_pct"]),
+            late_fine_pct=float(defaults["late_fine_pct"]),
+            late_fine_fixed=float(defaults["late_fine_fixed"]),
+            vp_sensitive_to_advance_date=bool(defaults["vp_sensitive_to_advance_date"]),
+            total_term_days=int(defaults["total_term_days"]),
+            grace_days=int(defaults["grace_days"]),
+            dc_value=dc_value,
+            pricing_policy=str(defaults["pricing_policy"]),
+            target_xirr_fund_annual_pct=float(defaults["target_xirr_fund_annual_pct"]),
+            accrual_start_delay_days=int(defaults["accrual_start_delay_days"]),
+        )
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    st.title("Assistente de Conceitos")
+    st.caption("Manual interativo para explicar o racional de cálculo e os conceitos da simulação.")
+    render_concept_assistant_controls(projection, key_prefix="concept_assistant_page")
+
+
 def build_timeline_comments(
     advance_date: date,
     grace_end: date,
@@ -3181,7 +3396,7 @@ def calculate_doctor_offer_from_net(
     operational_fixed_cost: float,
     grace_days: int,
     desired_net_value: float,
-    total_term_days: int = DOCTOR_FIXED_TERM_DAYS,
+    total_term_days: int = DEFAULT_FIXED_TERM_DAYS,
     vp_sensitive_to_advance_date: bool = False,
     accrual_start_delay_days: int = DEFAULT_ACCRUAL_START_DELAY_DAYS,
 ) -> dict[str, object]:
@@ -3232,7 +3447,7 @@ def save_doctor_request_to_state(offer: dict[str, object], credit_limit: float) 
         "total_term_days": int(
             st.session_state.get("fund_accrual_start_delay_days", DEFAULT_ACCRUAL_START_DELAY_DAYS)
         )
-        + DOCTOR_FIXED_TERM_DAYS,
+        + int(st.session_state.get("fund_fixed_term_days", DEFAULT_FIXED_TERM_DAYS)),
         "hospital_payment_day": offer["hospital_payment_day"],
         "monthly_rate_pct": offer["monthly_rate_pct"],
         "pricing_policy": st.session_state.get("fund_pricing_policy", PRICING_POLICY_RATE),
@@ -3251,8 +3466,11 @@ def save_doctor_request_to_state(offer: dict[str, object], credit_limit: float) 
         "late_monthly_rate_pct": float(st.session_state.get("fund_late_monthly_rate_pct", 1.0)),
         "late_fine_pct": float(st.session_state.get("fund_late_fine_pct", 2.0)),
         "late_fine_fixed": float(st.session_state.get("fund_late_fine_fixed", 0.0)),
-        "vp_sensitive_to_advance_date": bool(st.session_state.get("fund_vp_sensitive_to_advance_date", False)),
+        "vp_sensitive_to_advance_date": bool(
+            st.session_state.get("fund_vp_sensitive_to_advance_date", DEFAULT_VP_SENSITIVE_TO_ADVANCE_DATE)
+        ),
         "accrual_start_delay_days": int(st.session_state.get("fund_accrual_start_delay_days", DEFAULT_ACCRUAL_START_DELAY_DAYS)),
+        "fixed_term_days": int(st.session_state.get("fund_fixed_term_days", DEFAULT_FIXED_TERM_DAYS)),
         "grace_days": offer["grace_days"],
         "first_due_date": offer["first_due_date"],
         "present_value": offer["present_value"],
@@ -3285,13 +3503,20 @@ def get_fund_defaults() -> dict[str, object]:
             request.get("accrual_start_delay_days", DEFAULT_ACCRUAL_START_DELAY_DAYS),
         )
     )
-    total_term_default = accrual_start_delay_default + DOCTOR_FIXED_TERM_DAYS
+    fixed_term_default = int(
+        st.session_state.get(
+            "fund_fixed_term_days",
+            request.get("fixed_term_days", DEFAULT_FIXED_TERM_DAYS),
+        )
+    )
+    total_term_default = accrual_start_delay_default + fixed_term_default
     if request and st.session_state.get("doctor_request_pending_sync"):
         return {
             "advance_date": request.get("request_date", DEFAULT_ADVANCE_DATE),
             "hospital_payment_day": int(request.get("hospital_payment_day", DEFAULT_HOSPITAL_BUSINESS_DAY)),
             "installment_count": max(1, min(int(request.get("installment_count", 3)), 4)),
             "accrual_start_delay_days": accrual_start_delay_default,
+            "fixed_term_days": fixed_term_default,
             "total_term_days": total_term_default,
             "monthly_rate_pct": monthly_rate_default,
             "pricing_policy": pricing_policy_default,
@@ -3310,7 +3535,12 @@ def get_fund_defaults() -> dict[str, object]:
             "late_monthly_rate_pct": float(st.session_state.get("fund_late_monthly_rate_pct", request.get("late_monthly_rate_pct", 1.0))),
             "late_fine_pct": float(st.session_state.get("fund_late_fine_pct", request.get("late_fine_pct", 2.0))),
             "late_fine_fixed": float(st.session_state.get("fund_late_fine_fixed", request.get("late_fine_fixed", 0.0))),
-            "vp_sensitive_to_advance_date": bool(st.session_state.get("fund_vp_sensitive_to_advance_date", request.get("vp_sensitive_to_advance_date", False))),
+            "vp_sensitive_to_advance_date": bool(
+                st.session_state.get(
+                    "fund_vp_sensitive_to_advance_date",
+                    request.get("vp_sensitive_to_advance_date", DEFAULT_VP_SENSITIVE_TO_ADVANCE_DATE),
+                )
+            ),
             "dc_value": min(float(request.get("requested_value", credit_limit)), credit_limit),
             "credit_limit": credit_limit,
         }
@@ -3324,6 +3554,7 @@ def get_fund_defaults() -> dict[str, object]:
         "hospital_payment_day": int(st.session_state.get("fund_hospital_payment_day", request.get("hospital_payment_day", DEFAULT_HOSPITAL_BUSINESS_DAY))),
         "installment_count": max(1, min(int(installment_count), 4)),
         "accrual_start_delay_days": accrual_start_delay_default,
+        "fixed_term_days": fixed_term_default,
         "total_term_days": total_term_default,
         "monthly_rate_pct": monthly_rate_default,
         "pricing_policy": pricing_policy_default,
@@ -3342,7 +3573,12 @@ def get_fund_defaults() -> dict[str, object]:
         "late_monthly_rate_pct": float(st.session_state.get("fund_late_monthly_rate_pct", request.get("late_monthly_rate_pct", 1.0))),
         "late_fine_pct": float(st.session_state.get("fund_late_fine_pct", request.get("late_fine_pct", 2.0))),
         "late_fine_fixed": float(st.session_state.get("fund_late_fine_fixed", request.get("late_fine_fixed", 0.0))),
-        "vp_sensitive_to_advance_date": bool(st.session_state.get("fund_vp_sensitive_to_advance_date", request.get("vp_sensitive_to_advance_date", False))),
+        "vp_sensitive_to_advance_date": bool(
+            st.session_state.get(
+                "fund_vp_sensitive_to_advance_date",
+                request.get("vp_sensitive_to_advance_date", DEFAULT_VP_SENSITIVE_TO_ADVANCE_DATE),
+            )
+        ),
         "dc_value": min(float(st.session_state.get("fund_dc_value", request.get("requested_value", credit_limit))), calculate_credit_limit(float(st.session_state.get("fund_receivable_value", receivable_default)), float(st.session_state.get("fund_advance_pct", advance_pct_default)))),
         "credit_limit": calculate_credit_limit(float(st.session_state.get("fund_receivable_value", receivable_default)), float(st.session_state.get("fund_advance_pct", advance_pct_default))),
     }
@@ -3359,6 +3595,7 @@ def sync_fund_widget_state(defaults: dict[str, object]) -> None:
     st.session_state["fund_pricing_policy"] = defaults["pricing_policy"]
     st.session_state["fund_target_xirr_fund_annual_pct"] = defaults["target_xirr_fund_annual_pct"]
     st.session_state["fund_accrual_start_delay_days"] = defaults["accrual_start_delay_days"]
+    st.session_state["fund_fixed_term_days"] = defaults["fixed_term_days"]
     st.session_state["fund_total_term_days"] = defaults["total_term_days"]
     st.session_state["fund_benchmark_annual_pct"] = defaults["benchmark_annual_pct"]
     st.session_state["fund_benchmark_mode"] = defaults["benchmark_mode"]
@@ -3384,6 +3621,7 @@ def sync_doctor_widget_state_from_fund(defaults: dict[str, object]) -> None:
     st.session_state["doctor_hospital_payment_day"] = defaults["hospital_payment_day"]
     st.session_state["doctor_grace_days"] = defaults["grace_days"]
     st.session_state["doctor_accrual_start_delay_days"] = defaults["accrual_start_delay_days"]
+    st.session_state["doctor_fixed_term_days"] = defaults["fixed_term_days"]
     st.session_state["doctor_monthly_rate_pct"] = defaults["monthly_rate_pct"]
     st.session_state["doctor_receivable_value"] = defaults["receivable_value"]
     st.session_state["doctor_advance_pct"] = defaults["advance_pct"]
@@ -3465,10 +3703,16 @@ def render_doctor_parameters(defaults: dict[str, object]) -> dict[str, object]:
     )
     grace_days = int(defaults["grace_days"])
     accrual_start_delay_days = int(defaults["accrual_start_delay_days"])
+    fixed_term_days = int(defaults["fixed_term_days"])
     st.markdown("**Regra de carência**")
     st.caption(
         f"O primeiro repasse elegível ocorre no primeiro pagamento hospitalar em ou após "
         f"{grace_days} dias corridos da antecipação."
+    )
+    st.markdown("**Prazo da operação**")
+    st.caption(
+        f"Prazo total = {accrual_start_delay_days} dias até o início do accrual "
+        f"+ {fixed_term_days} dias de prazo econômico = {accrual_start_delay_days + fixed_term_days} dias corridos."
     )
     monthly_rate_pct = float(defaults["monthly_rate_pct"])
     operational_variable_pct = 0.0
@@ -3494,6 +3738,7 @@ def render_doctor_parameters(defaults: dict[str, object]) -> dict[str, object]:
         "hospital_payment_day": int(hospital_payment_day),
         "grace_days": grace_days,
         "accrual_start_delay_days": accrual_start_delay_days,
+        "fixed_term_days": fixed_term_days,
         "monthly_rate_pct": float(monthly_rate_pct),
         "operational_variable_pct": float(operational_variable_pct),
         "operational_fixed_cost": float(operational_fixed_cost),
@@ -3522,10 +3767,11 @@ def render_doctor_request_card(defaults: dict[str, object], doctor_params: dict[
     hospital_payment_day = int(doctor_params["hospital_payment_day"])
     grace_days = int(doctor_params["grace_days"])
     accrual_start_delay_days = int(doctor_params["accrual_start_delay_days"])
+    fixed_term_days = int(doctor_params["fixed_term_days"])
     monthly_rate_pct = float(doctor_params["monthly_rate_pct"])
     operational_variable_pct = float(doctor_params["operational_variable_pct"])
     operational_fixed_cost = float(doctor_params["operational_fixed_cost"])
-    operation_total_term_days = accrual_start_delay_days + DOCTOR_FIXED_TERM_DAYS
+    operation_total_term_days = accrual_start_delay_days + fixed_term_days
 
     if credit_limit < 1000:
         st.error("O limite de crédito disponível precisa ser de pelo menos R$ 1.000.")
@@ -3768,7 +4014,7 @@ def render_doctor_api_notes() -> None:
                 ),
                 (
                     "prazo_total_operacao",
-                    "dias corridos entre a antecipação e a data limite da operação; no modelo atual = dias até accrual + 90.",
+                    "dias corridos entre a antecipação e a data limite da operação; no modelo atual = dias até accrual + prazo econômico configurado.",
                 ),
                 (
                     "carencia_dias_inicio_accrual_juros",
@@ -3928,7 +4174,11 @@ def main() -> None:
     if "pending_selected_area" in st.session_state:
         st.session_state["selected_area"] = st.session_state.pop("pending_selected_area")
     with st.sidebar:
-        selected_area = st.radio("Menu", ["Aplicação do Médico", "Aplicação do Fundo"], key="selected_area")
+        selected_area = st.radio(
+            "Menu",
+            ["Aplicação do Médico", "Aplicação do Fundo", "Assistente de Conceitos"],
+            key="selected_area",
+        )
 
     if selected_area == "Aplicação do Médico":
         if st.session_state.get("_previous_area") == "Aplicação do Fundo":
@@ -3946,6 +4196,11 @@ def main() -> None:
             unsafe_allow_html=True,
         )
         render_doctor_app(defaults, doctor_params)
+        st.session_state["_previous_area"] = selected_area
+        return
+
+    if selected_area == "Assistente de Conceitos":
+        render_concept_assistant_page(defaults)
         st.session_state["_previous_area"] = selected_area
         return
 
@@ -4000,11 +4255,23 @@ def main() -> None:
             step=1,
             key="fund_accrual_start_delay_days",
         )
+        fixed_term_days = st.number_input(
+            "Prazo econômico após início do accrual (dias corridos)",
+            min_value=1,
+            max_value=365,
+            value=int(defaults["fixed_term_days"]),
+            step=1,
+            key="fund_fixed_term_days",
+        )
         operation_mode = "Por prazo total"
-        total_term_days_input = int(accrual_start_delay_days) + DOCTOR_FIXED_TERM_DAYS
+        total_term_days_input = int(accrual_start_delay_days) + int(fixed_term_days)
         st.caption(
             f"Prazo total da operação: {int(accrual_start_delay_days)} dias até o accrual "
-            f"+ {DOCTOR_FIXED_TERM_DAYS} dias de accrual = {total_term_days_input} dias corridos."
+            f"+ {int(fixed_term_days)} dias de prazo econômico = {total_term_days_input} dias corridos."
+        )
+        st.info(
+            "Calendários do modelo: carência, início do accrual, prazo econômico e data limite usam dias corridos. "
+            "VP, accrual das curvas, Selic/benchmark, repasses hospitalares e radar usam dias úteis, excluindo feriados parametrizados."
         )
         installment_count_input = None
         operation_limit_date = advance_date + timedelta(days=int(total_term_days_input))
