@@ -3759,6 +3759,10 @@ def render_doctor_api_notes() -> None:
                     "valor presente solicitado pelo médico; corresponde ao valor líquido a depositar hoje.",
                 ),
                 (
+                    "taxa_antecipacao_contratada",
+                    "taxa de antecipação efetivamente contratada para a cessão específica daquele médico/operação.",
+                ),
+                (
                     "datas_vencimento_previstas",
                     "lista dos repasses hospitalares elegíveis calculados pelo calendário do hospital.",
                 ),
@@ -3836,6 +3840,40 @@ def render_doctor_api_notes() -> None:
             ],
         )
 
+    with st.expander("API 2.1 · Taxa mínima para rentabilidade", expanded=False):
+        st.caption(
+            "Alternativa simplificada à API 2. A FIN-X envia os parâmetros operacionais mínimos e a Integral retorna "
+            "a taxa mínima de antecipação necessária para garantir a rentabilidade alvo da operação/fundo."
+        )
+        render_api_field_table(
+            "Entrada",
+            [
+                ("id_hospital", "identificador do hospital usado para buscar calendário de pagamento, feriados e regra operacional."),
+                (
+                    "prazo_total_operacao",
+                    "prazo jurídico/econômico total da operação em dias corridos, usado para definir a data limite/vencimento econômico.",
+                ),
+                (
+                    "carencia_dias_inicio_accrual_juros",
+                    "dias corridos após a antecipação para início do accrual de juros/QMM.",
+                ),
+                (
+                    "carencia_dias_inicio_radar_cobranca",
+                    "dias corridos após a antecipação para definir o primeiro repasse elegível e ativar radar/cobrança.",
+                ),
+            ],
+        )
+        render_api_field_table(
+            "Retorno",
+            [
+                (
+                    "taxa_antecipacao_minima",
+                    "taxa mínima de antecipação que preserva a rentabilidade alvo definida pela Integral/Fundo.",
+                ),
+                ("mensagem_processamento", "descrição curta do resultado ou da inconsistência encontrada."),
+            ],
+        )
+
     with st.expander("API 3 · Extrato preliminar do lastro", expanded=False):
         st.caption("Integração para enviar ao fundo os recebíveis que compõem o lastro potencial da antecipação.")
         render_api_field_table(
@@ -3859,6 +3897,18 @@ def render_doctor_api_notes() -> None:
                 ("mensagem_processamento", "descrição curta do sucesso ou do erro encontrado na geração do PDF."),
             ],
         )
+    st.markdown("<strong>Premissas para a FIN-X calcular o QMM por repasse</strong>", unsafe_allow_html=True)
+    qmm_premises = [
+        "Usar a taxa de antecipação contratada para a cessão específica do médico.",
+        "Usar a mesma data de antecipação, data de início do accrual e data limite/vencimento econômico.",
+        "Usar o mesmo DC/valor de face da operação e aplicar cap do QMM no DC.",
+        "Calcular as datas de repasse elegíveis pelo calendário do hospital, excluindo fins de semana e feriados parametrizados.",
+        "Aplicar a janela de radar configurada, por exemplo 5 dias úteis antes e 5 dias úteis depois do repasse.",
+        "Dentro do radar, calcular o QMM como o valor futuro projetado até o fim da janela do radar, limitado ao DC.",
+        "Fora do radar, calcular o QMM pela curva econômica acumulada desde o início do accrual até a data de referência, limitado ao DC.",
+    ]
+    for item in qmm_premises:
+        st.markdown(f"<div class='doctor-impact-item'>• {item}</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
