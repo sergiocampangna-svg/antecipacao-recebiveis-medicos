@@ -2672,6 +2672,171 @@ def render_concept_assistant_page(defaults: dict[str, object]) -> None:
     render_concept_assistant_controls(projection, key_prefix="concept_assistant_page")
 
 
+def render_spec_table(title: str, rows: list[tuple[str, str, str]]) -> None:
+    st.markdown(f"**{title}**")
+    st.dataframe(
+        pd.DataFrame(rows, columns=["Campo", "Tipo / origem", "Descrição"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def render_calculation_engine_spec_page() -> None:
+    st.title("Especificação do Motor de Cálculo")
+    st.caption(
+        "Parâmetros, conceitos e algoritmos mínimos para calcular o valor presente e o QMM de cobrança "
+        "em cada repasse mensal dentro da janela da operação."
+    )
+
+    st.subheader("Objetivo do motor")
+    st.markdown(
+        """
+        Este motor tem dois objetivos principais:
+
+        1. calcular o valor presente que será creditado ao médico;
+        2. calcular o valor de QMM/cobrança aplicável em cada repasse hospitalar previsto dentro da janela da operação.
+
+        A especificação abaixo não cobre indicadores do fundo, performance, XIRR, benchmark ou pós-vencimento.
+        """
+    )
+
+    render_spec_table(
+        "Parâmetros de entrada",
+        [
+            ("data_antecipacao", "input", "Data em que o médico recebe o valor presente."),
+            ("prazo_total_operacao", "input", "Prazo em dias corridos entre a data da antecipação e o vencimento econômico."),
+            ("dc_valor_face", "input", "Valor nominal futuro da operação e teto do QMM/cobrança."),
+            ("taxa_antecipacao_am", "input", "Taxa mensal usada para descontar o VP e capitalizar o QMM."),
+            ("carencia_dias_inicio_accrual_juros", "input", "Dias corridos após a antecipação para início do accrual de juros."),
+            ("carencia_dias_inicio_cobranca", "input", "Dias corridos após a antecipação para definir o primeiro repasse elegível."),
+            ("dias_uteis_radar_qmm", "input", "Quantidade de dias úteis antes/depois de cada repasse para formar o radar."),
+            (
+                "datas_vencimento_pagamentos_hospital",
+                "input",
+                "Lista das datas previstas de pagamento/repasse do hospital.",
+            ),
+            (
+                "calendario_dias_uteis_feriados",
+                "função interna",
+                "Calendário usado internamente para contar dias úteis, excluir feriados e calcular janelas de radar.",
+            ),
+        ],
+    )
+
+    render_spec_table(
+        "Saídas do motor",
+        [
+            ("data_inicio_accrual", "calculado", "Data da antecipação + carência de accrual em dias corridos."),
+            ("data_limite_operacao", "calculado", "Data da antecipação + prazo total da operação em dias corridos."),
+            ("repasses_elegiveis", "calculado", "Datas de pagamento do hospital filtradas pela carência de cobrança e pela data limite."),
+            ("valor_presente", "calculado", "DC descontado pela taxa anual equivalente e dias úteis até o vencimento econômico."),
+            ("qmm_cobranca_por_repasse", "calculado", "Valor de QMM/cobrança aplicável em cada repasse elegível."),
+        ],
+    )
+
+    st.subheader("Conceitos centrais")
+    concept_rows = [
+        ("Valor Presente", "Valor equivalente hoje ao DC futuro, descontado pela taxa de antecipação."),
+        ("DC / Valor de Face", "Valor nominal futuro da operação e teto do QMM/cobrança."),
+        ("Data limite / vencimento econômico", "Data final usada para calcular o VP e limitar a janela da operação."),
+        ("Início do accrual", "Data a partir da qual o valor econômico começa a capitalizar juros."),
+        ("Repasse elegível", "Pagamento hospitalar que ocorre após a carência de cobrança e dentro da data limite."),
+        ("Radar QMM", "Janela de dias úteis antes/depois do repasse usada para antecipar o valor futuro aplicável."),
+        ("QMM de cobrança", "Piso de cobrança da operação em cada repasse, limitado ao DC."),
+    ]
+    st.dataframe(pd.DataFrame(concept_rows, columns=["Conceito", "Definição"]), use_container_width=True, hide_index=True)
+
+    st.subheader("Algoritmo do motor")
+    with st.expander("1. Valor presente", expanded=True):
+        st.markdown(
+            """
+            ```text
+            taxa_anual = (1 + taxa_mensal) ^ 12 - 1
+            data_limite_operacao = data_antecipacao + prazo_total_operacao
+            DU = dias úteis entre data_antecipacao e data_limite_operacao
+            VP = DC / (1 + taxa_anual) ^ (DU / 252)
+            ```
+
+            O calendário de dias úteis e feriados é função interna do motor.
+            """
+        )
+
+    with st.expander("2. Datas e calendário", expanded=False):
+        st.markdown(
+            """
+            ```text
+            data_inicio_accrual = data_antecipacao + carencia_dias_inicio_accrual_juros
+            data_limite_operacao = data_antecipacao + prazo_total_operacao
+            data_minima_cobranca = data_antecipacao + carencia_dias_inicio_cobranca
+            ```
+
+            Carências e prazo total usam dias corridos. A contagem de DU do VP, a capitalização econômica e o radar
+            usam dias úteis, excluindo sábados, domingos e feriados parametrizados.
+            """
+        )
+
+    with st.expander("3. Repasses elegíveis", expanded=False):
+        st.markdown(
+            """
+            ```text
+            repasses_elegiveis =
+                datas_pagamento_hospital
+                onde data >= data_minima_cobranca
+                e data <= data_limite_operacao
+            ```
+
+            A lista de datas de pagamento do hospital pode ser recebida por API. Assim o motor não depende do cadastro
+            do hospital para calcular os valores.
+            """
+        )
+
+    with st.expander("4. QMM e cobrança por repasse", expanded=False):
+        st.markdown(
+            """
+            ```text
+            para cada repasse_elegivel:
+                radar_inicio = repasse - N dias úteis
+                radar_fim = repasse + N dias úteis
+
+                DU_fim_radar = dias úteis entre data_inicio_accrual e radar_fim
+                valor_futuro_fim_radar = VP * (1 + taxa_anual) ^ (DU_fim_radar / 252)
+
+                QMM_cobranca_repasse = min(valor_futuro_fim_radar, DC)
+            ```
+
+            Como o QMM é piso de cobrança, o valor calculado para o fim do radar é o valor aplicável ao repasse,
+            sempre limitado ao DC.
+            """
+        )
+
+    with st.expander("5. Retorno esperado da API / função", expanded=False):
+        st.markdown(
+            """
+            ```json
+            {
+              "valor_presente": 89257.04,
+              "data_limite_operacao": "2026-07-30",
+              "repasses": [
+                {
+                  "data_repasse": "2026-05-22",
+                  "radar_inicio": "2026-05-15",
+                  "radar_fim": "2026-05-29",
+                  "qmm_cobranca": 93726.23
+                }
+              ]
+            }
+            ```
+            """
+        )
+
+    st.subheader("Observação para integração")
+    st.info(
+        "Para manter o motor independente do hospital, envie diretamente as datas de vencimento dos pagamentos do hospital. "
+        "O motor filtra as datas pela carência de cobrança e pelo prazo total, e usa internamente o calendário de dias úteis "
+        "e feriados para VP, accrual e radar."
+    )
+
+
 def build_timeline_comments(
     advance_date: date,
     grace_end: date,
@@ -4176,7 +4341,7 @@ def main() -> None:
     with st.sidebar:
         selected_area = st.radio(
             "Menu",
-            ["Aplicação do Médico", "Aplicação do Fundo", "Assistente de Conceitos"],
+            ["Aplicação do Médico", "Aplicação do Fundo", "Assistente de Conceitos", "Especificação do Motor"],
             key="selected_area",
         )
 
@@ -4201,6 +4366,11 @@ def main() -> None:
 
     if selected_area == "Assistente de Conceitos":
         render_concept_assistant_page(defaults)
+        st.session_state["_previous_area"] = selected_area
+        return
+
+    if selected_area == "Especificação do Motor":
+        render_calculation_engine_spec_page()
         st.session_state["_previous_area"] = selected_area
         return
 
